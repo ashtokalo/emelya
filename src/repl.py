@@ -1138,7 +1138,7 @@ class REPL:
                 print("\n\nBye!")
                 break
 
-            if not user_input:
+            if not user_input or not user_input.strip():
                 continue
 
             # Handle /commands — anything starting with / is a command, never sent to model

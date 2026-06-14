@@ -233,10 +233,12 @@ Extension tools:        ~200-300 tokens (only when loaded)
 Place `aigent.md` in the working directory for project-specific instructions:
 
 ```markdown
-This is a Python 3.12 project using FastAPI.
-Run tests with: pytest -x
-Use ruff for linting.
+Use виртуальное окружение .venv.
+Тесты запускай через pytest -x.
+Линтинг — ruff check.
 ```
+
+This file is NOT about aigent itself — it's instructions for the AI when working in YOUR project.
 
 ## Requirements
 

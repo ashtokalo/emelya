@@ -1,3 +1,26 @@
-.aigent
+# Runtime data
+.aigent/
 logs/
-__pycache__
+__pycache__/
+*.pyc
+
+# Sensitive
+*.key.txt
+*.key
+.env
+
+# Debug artifacts
+/tmp/aigent_debug/
+log_*.txt
+log-*.txt
+context_*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

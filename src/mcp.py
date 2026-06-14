@@ -91,8 +91,19 @@ class MCPClient:
                 self._process.kill()
             self._process = None
 
+    @property
+    def is_alive(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def _ensure_running(self):
+        """Restart server if it died."""
+        if not self.is_alive:
+            self.stop()  # cleanup
+            self.start(timeout=getattr(self, "_timeout", 30))
+
     def call_tool(self, tool_name: str, arguments: dict) -> str:
-        """Call an MCP tool, return result as string."""
+        """Call an MCP tool, return result as string. Auto-reconnects if server died."""
+        self._ensure_running()
         result = self._request("tools/call", {
             "name": tool_name,
             "arguments": arguments,
