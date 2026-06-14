@@ -10,11 +10,12 @@ class Config:
     host: str = "localhost"
     port: int = 8080
     model: str = "default"
+    model_name: str = None  # name from models.json, None = "local"
     temperature: float = 0.7
     max_tokens: int = 1024
     context_limit: int = 8000
     work_dir: Path = None
-    max_iterations: int = 20
+    max_iterations: int = 10
     stream: bool = True
     confirm_mode: str = "confirm_all"  # confirm_all | confirm_write | no_confirm
 
@@ -33,7 +34,10 @@ def parse_args(argv=None) -> Config:
     )
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--model", default="default")
+    parser.add_argument("--model", default="default",
+                        help="Model name on the server (default: default)")
+    parser.add_argument("--use", default=None, metavar="NAME",
+                        help="Use a named model from .aigent/models.json")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--context-limit", type=int, default=8000)
@@ -50,13 +54,13 @@ def parse_args(argv=None) -> Config:
     args = parser.parse_args(argv)
 
     work_dir = Path(args.work_dir).resolve()
-
     confirm_map = {"all": "confirm_all", "write": "confirm_write", "none": "no_confirm"}
 
     return Config(
         host=args.host,
         port=args.port,
         model=args.model,
+        model_name=args.use,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
         context_limit=args.context_limit,

@@ -78,7 +78,11 @@ def execute(args: dict, ctx) -> str:
         line_content = lines[i].rstrip("\n").rstrip("\r")
         result_lines.append(f"{i + 1}\t{line_content}")
 
-    result_lines.append(f"[Lines {start + 1}-{end} of {total}]")
+    remaining = total - end
+    if remaining > 0:
+        result_lines.append(f"[Lines {start + 1}-{end} of {total}, {remaining} more — use offset={end + 1} to continue]")
+    else:
+        result_lines.append(f"[Lines {start + 1}-{end} of {total}]")
 
     ctx.files_read.add(str(path))
     return "\n".join(result_lines)

@@ -28,7 +28,7 @@ DEFINITION = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Number of paragraphs/lines to return (default: 50)",
+                    "description": "Number of paragraphs/pages to return (default: 50, PDF default: 1)",
                 },
             },
             "required": ["path"],
@@ -77,12 +77,13 @@ def _read_odt(path: Path) -> list:
     return paragraphs
 
 
-def _read_via_tool(path: Path, tool: str, tool_args: list) -> list:
+def _read_via_tool(path: Path, tool: str, tool_args: list, timeout: int = 60,
+                   suffix_args: list = None) -> list:
     """Read document via external CLI tool."""
     try:
+        cmd = [tool] + tool_args + [str(path)] + (suffix_args or [])
         result = subprocess.run(
-            [tool] + tool_args + [str(path)],
-            capture_output=True, text=True, timeout=30,
+            cmd, capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode == 0 and result.stdout.strip():
             return [line for line in result.stdout.splitlines() if line.strip()]
@@ -91,25 +92,50 @@ def _read_via_tool(path: Path, tool: str, tool_args: list) -> list:
     except FileNotFoundError:
         return None  # tool not installed
     except subprocess.TimeoutExpired:
-        return [f"Error: {tool} timed out"]
+        return [f"Error: {tool} timed out ({timeout}s). File may be too large — try with offset/limit."]
     return [f"Error: {tool} returned no output"]
 
 
-def _read_pdf(path: Path) -> list:
-    """Read PDF via pdftotext (poppler-utils)."""
-    lines = _read_via_tool(path, "pdftotext", ["-layout", "-"])
+def _read_pdf(path: Path, offset: int = 0, limit: int = 50) -> list:
+    """Read PDF via pdftotext (poppler-utils). Supports page range."""
+    # Get page count first
+    page_count = _get_pdf_pages(path)
+
+    # For large PDFs, read only requested pages
+    first_page = offset + 1  # pdftotext uses 1-based
+    last_page = min(offset + limit, page_count) if page_count else offset + limit
+
+    args = ["-layout", "-f", str(first_page), "-l", str(last_page)]
+    lines = _read_via_tool(path, "pdftotext", args, timeout=60, suffix_args=["-"])
     if lines is None:
-        # Try python-based fallback — read as text with basic extraction
         lines = _read_via_tool(path, "python3", [
             "-c",
-            f"import subprocess; subprocess.run(['strings', '{path}'], timeout=10)",
-        ])
+            f"import subprocess; subprocess.run(['strings', '{path}'], timeout=30)",
+        ], timeout=60)
         if lines is None:
             return [
                 "Error: cannot read PDF — pdftotext not installed.",
                 "Install: sudo apt install poppler-utils",
             ]
+
+    if page_count:
+        lines.append(f"[Pages {first_page}-{last_page} of {page_count}]")
     return lines
+
+
+def _get_pdf_pages(path: Path) -> int:
+    """Get PDF page count via pdfinfo."""
+    try:
+        result = subprocess.run(
+            ["pdfinfo", str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("Pages:"):
+                return int(line.split(":", 1)[1].strip())
+    except Exception:
+        pass
+    return 0
 
 
 def _read_doc(path: Path) -> list:
@@ -167,6 +193,18 @@ def execute(args: dict, ctx) -> str:
     if not reader:
         supported = ", ".join(READERS.keys())
         return f"Error: unsupported format '{ext}'. Supported: {supported}"
+
+    # PDF handles pagination internally (pages, not paragraphs)
+    if ext == ".pdf":
+        pdf_limit = args.get("limit", 1)  # default 1 page for PDF
+        paragraphs = reader(path, offset, pdf_limit)
+        total = len(paragraphs)
+        if total == 0:
+            return "Document is empty"
+        size_kb = path.stat().st_size / 1024
+        header = f"[.pdf document, {size_kb:.0f}KB]"
+        lines = [header] + [f"{i + 1}. {p}" for i, p in enumerate(paragraphs)]
+        return "\n".join(lines)
 
     paragraphs = reader(path)
     total = len(paragraphs)

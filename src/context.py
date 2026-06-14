@@ -38,6 +38,18 @@ class Context:
         if self.messages and self.messages[-1]["role"] == "user":
             self.messages.pop()
 
+    def drop(self, display_index: int) -> str:
+        """Remove message by its display index (as shown in /history).
+        Index 0 is system prompt (cannot be removed)."""
+        if display_index == 0:
+            return "Cannot remove system prompt"
+        msg_index = display_index - 1  # offset for system prompt
+        if msg_index < 0 or msg_index >= len(self.messages):
+            return f"Invalid index: {display_index}"
+        role = self.messages[msg_index].get("role", "?")
+        self.messages.pop(msg_index)
+        return f"Removed [{display_index}] {role}"
+
     def get_messages(self) -> list:
         """Return full message list for API (system + conversation)."""
         msgs = []

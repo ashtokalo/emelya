@@ -9,7 +9,7 @@ from pathlib import Path
 from config import Config
 from context import Context
 from llm import LLMClient, LLMError
-from log import SessionLog
+from log import SessionLog, collect_stats
 from mcp import MCPClient, MCPError, compact_tool_description, load_mcp_config, load_cache, save_cache
 from sandbox import Sandbox
 from tools import ToolContext, ToolRegistry
@@ -22,10 +22,6 @@ class REPL:
 
     def __init__(self, config: Config):
         self.config = config
-        self.llm = LLMClient(
-            base_url=config.base_url,
-            model=config.model,
-        )
         self.context = Context(context_limit=config.context_limit)
         self.sandbox = Sandbox(config.work_dir)
         self.registry = ToolRegistry()
@@ -35,6 +31,12 @@ class REPL:
         self.skills_dir = self.app_dir / "skills"
         self.agents_dir = self.app_dir / "agents"
         self.sessions_dir = config.work_dir / ".aigent" / "sessions"
+
+        # Models management
+        self._models_path = config.work_dir / ".aigent" / "models.json"
+        self._models = self._load_models()
+        self.active_model = config.model_name or "local"
+        self.llm = self._create_llm_client()
 
         # Session management
         self.session_name = datetime.now().strftime("tmp%Y%m%d%H%M%S")
@@ -71,6 +73,78 @@ class REPL:
     def _create_log(self) -> SessionLog:
         log_path = self._session_dir() / "log.txt"
         return SessionLog(log_path)
+
+    # --- Model management ---
+
+    def _load_models(self) -> dict:
+        """Load models from .aigent/models.json. Always includes 'local' from CLI args."""
+        models = {
+            "local": {
+                "base_url": self.config.base_url,
+                "model": self.config.model,
+            }
+        }
+        if self._models_path.exists():
+            try:
+                data = json.loads(self._models_path.read_text(encoding="utf-8"))
+                models.update(data.get("models", {}))
+            except (json.JSONDecodeError, OSError):
+                pass
+        return models
+
+    def _save_models(self):
+        """Save models config (excluding 'local' which comes from CLI)."""
+        to_save = {k: v for k, v in self._models.items() if k != "local"}
+        self._models_path.parent.mkdir(parents=True, exist_ok=True)
+        self._models_path.write_text(
+            json.dumps({"models": to_save}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _create_llm_client(self) -> LLMClient:
+        """Create LLM client for the active model."""
+        cfg = self._models.get(self.active_model)
+        if not cfg:
+            cfg = self._models.get("local", {})
+            self.active_model = "local"
+        # Apply model-specific context_limit if set
+        model_ctx_limit = cfg.get("context_limit")
+        if model_ctx_limit:
+            self.context.context_limit = model_ctx_limit
+        else:
+            self.context.context_limit = self.config.context_limit
+        return LLMClient(
+            base_url=cfg.get("base_url", self.config.base_url),
+            model=cfg.get("model", "default"),
+            api_key=cfg.get("api_key"),
+        )
+
+    def _switch_model(self, name: str):
+        """Switch to a different model."""
+        if name not in self._models:
+            print(f"  Unknown model: {name}")
+            self._list_models()
+            return
+        prev = self.active_model
+        self.active_model = name
+        self.llm = self._create_llm_client()
+        self.tool_ctx.llm_client = self.llm
+        self.log.event(f"Model switched: {prev} -> {name} ({self.llm.base_url} / {self.llm.model})")
+        ok, info = self.llm.check_connection()
+        if ok:
+            print(f"  Switched to: {name} ({info})")
+        else:
+            print(f"  Switched to: {name} (warning: {info})")
+
+    def _list_models(self):
+        for name, cfg in self._models.items():
+            active = " *" if name == self.active_model else ""
+            url = cfg.get("base_url", "?")
+            model = cfg.get("model", "?")
+            has_key = " [key]" if cfg.get("api_key") else ""
+            ctx = cfg.get("context_limit")
+            ctx_str = f" ctx:{ctx // 1000}K" if ctx else ""
+            print(f"  {name}: {url} / {model}{has_key}{ctx_str}{active}")
 
     def _init_mcp(self):
         """Register MCP servers from cache. No connections at startup.
@@ -228,12 +302,22 @@ class REPL:
             "os": platform.platform(),
         })
 
-        # Append project config if exists
+        # Append project config if exists (aigent.md)
         if self.config.config_file.exists():
             try:
                 custom = self.config.config_file.read_text(encoding="utf-8").strip()
                 if custom:
                     prompt += f"\n\nProject instructions ({self.config.config_file.name}):\n{custom}"
+            except Exception:
+                pass
+
+        # Append local config if exists (.aigent/config.md — personal, not in repo)
+        local_config = self.config.work_dir / ".aigent" / "config.md"
+        if local_config.exists():
+            try:
+                local = local_config.read_text(encoding="utf-8").strip()
+                if local:
+                    prompt += f"\n\nLocal instructions ({local_config.name}):\n{local}"
             except Exception:
                 pass
 
@@ -297,11 +381,11 @@ class REPL:
 
     def _llm_call(self, messages, tools):
         """Single LLM call with streaming support. Returns response dict."""
-        url = f"{self.config.base_url}/v1/chat/completions"
+        url = f"{self.llm.base_url}/v1/chat/completions"
         self.log.request(url, messages, tools)
 
         tokens = self.context.estimate_tokens()
-        prefix = f"\nAigent ({tokens} tokens): "
+        prefix = f"\nAigent({self.active_model}, {tokens} tok): "
 
         if self.config.stream:
             prefix_printed = False
@@ -332,10 +416,46 @@ class REPL:
             if response.get("content"):
                 print(f"{prefix}{response['content']}")
 
-        self.log.response(response.get("content"), response.get("tool_calls"))
-        # Update real token counts if available
-        self.context.update_usage(response.get("usage"))
+        self.log.response(
+            response.get("content"), response.get("tool_calls"),
+            usage=response.get("usage"), model=self.llm.model,
+        )
         return response
+
+    @staticmethod
+    def _trim_work_context(messages: list) -> list:
+        """Trim work context while keeping tool_call/tool groups intact.
+
+        Groups: [assistant with tool_calls] + [tool results for those calls]
+        Never split a group — either keep it whole or remove it entirely.
+        Keep: first 2 messages (system + user) + last complete group.
+        """
+        # Find group boundaries: each group starts with an assistant message
+        # that has tool_calls, followed by tool result messages
+        head = messages[:2]  # system + user (always keep)
+        rest = messages[2:]
+
+        # Split rest into groups
+        groups = []
+        current = []
+        for msg in rest:
+            if msg.get("role") == "assistant" and current:
+                groups.append(current)
+                current = []
+            current.append(msg)
+        if current:
+            groups.append(current)
+
+        if not groups:
+            return messages
+
+        # Keep last 2 groups (last exchange + current)
+        keep = 2 if len(groups) >= 2 else 1
+        kept = []
+        for g in groups[-keep:]:
+            kept.extend(g)
+
+        return head + kept
 
     def _agent_loop(self, user_input: str):
         """Run the agent loop with work context isolation.
@@ -348,10 +468,11 @@ class REPL:
         # Trim context if needed
         self.context.trim()
 
-        # First call — from main context
+        # First call — from main context (update usage for accurate token tracking)
         tools = self.registry.get_tools()
         try:
             response = self._llm_call(self.context.get_messages(), tools)
+            self.context.update_usage(response.get("usage"))
         except (LLMError, KeyboardInterrupt) as e:
             # No response received — remove orphaned user message
             self.context.pop_last_user()
@@ -373,6 +494,7 @@ class REPL:
         work_messages = list(self.context.get_messages())
         work_messages.append(response["raw"])
         final_text = response.get("content") or ""
+        consecutive_errors = 0
 
         for iteration in range(self.config.max_iterations):
             # Execute tool calls
@@ -395,6 +517,34 @@ class REPL:
                     "content": result,
                 })
 
+                if result.startswith("Error:"):
+                    consecutive_errors += 1
+                else:
+                    consecutive_errors = 0
+
+            # Break if too many consecutive errors (model is stuck)
+            if consecutive_errors >= 3:
+                work_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_calls[-1]["id"] if tool_calls else "",
+                    "content": (
+                        "STOP: 3 consecutive errors. Your arguments are being truncated. "
+                        "Change approach: use smaller edits, split work into multiple steps, "
+                        "or write a helper script via bash."
+                    ),
+                })
+                consecutive_errors = 0
+
+            # Trim work context if too large, respecting tool_call/tool boundaries
+            work_size = 0
+            for m in work_messages:
+                work_size += len(m.get("content") or "")
+                if m.get("tool_calls"):
+                    work_size += len(json.dumps(m["tool_calls"]))
+            work_token_est = int(work_size / 3.5) + 1200  # +1200 for tool definitions
+            if work_token_est > self.context.context_limit * 0.7 and len(work_messages) > 6:
+                work_messages = self._trim_work_context(work_messages)
+
             # Next LLM call in work context (refresh tools — load_tools may have added new ones)
             tools = self.registry.get_tools()
             try:
@@ -415,12 +565,29 @@ class REPL:
             tool_calls = response.get("tool_calls")
             if not tool_calls:
                 break  # Final text response
+
+            # Progressive nudges to stop endless research
+            remaining = self.config.max_iterations - iteration - 1
+            if remaining == 3:
+                work_messages.append({
+                    "role": "user",
+                    "content": "IMPORTANT: Only 3 steps left. Start composing your answer.",
+                })
+            elif remaining == 1:
+                work_messages.append({
+                    "role": "user",
+                    "content": "LAST STEP. Give your final answer NOW. Do not call any more tools.",
+                })
         else:
-            # Max iterations — force final response
-            print("\n  (max iterations reached, finishing...)")
+            # Max iterations — force final response without tools
+            print("\n  (max iterations, forcing answer...)")
             work_messages.append({
                 "role": "user",
-                "content": "Please provide your final answer now.",
+                "content": (
+                    "STOP. Maximum tool call iterations reached. "
+                    "You MUST provide your final answer RIGHT NOW based on everything you have seen. "
+                    "Do NOT say you need more information."
+                ),
             })
             try:
                 response = self.llm.chat(
@@ -430,7 +597,8 @@ class REPL:
                 )
                 if response.get("content"):
                     final_text = response["content"]
-                    print(f"\nAigent: {final_text}")
+                    tokens = self.context.estimate_tokens()
+                    print(f"\nAigent({self.active_model}, {tokens} tok): {final_text}")
             except Exception as e:
                 print(f"\nError: {e}")
 
@@ -505,10 +673,22 @@ class REPL:
             self._print_full_context()
             return True
 
+        if command == "/stats":
+            self._print_stats()
+            return True
+
         # Commands with arguments
         parts = command.split(None, 1)
         cmd = parts[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd == "/drop":
+            if not arg or not arg.isdigit():
+                print("  Usage: /drop <index> (use /history to see indexes)")
+            else:
+                result = self.context.drop(int(arg))
+                print(f"  {result}")
+            return True
 
         if cmd == "/save":
             self._cmd_save(arg)
@@ -526,7 +706,114 @@ class REPL:
             self._cmd_mcp(arg)
             return True
 
+        if cmd == "/model":
+            self._cmd_model(arg)
+            return True
+
         return False
+
+    def _cmd_model(self, arg: str = ""):
+        """Handle /model subcommands."""
+        parts = arg.split(None, 1) if arg else []
+        subcmd = parts[0] if parts else ""
+        subarg = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcmd == "add":
+            self._model_add(subarg)
+        elif subcmd == "remove":
+            self._model_remove(subarg)
+        elif subcmd == "":
+            self._list_models()
+        elif subcmd in self._models:
+            # Direct switch: /model gpt4
+            self._switch_model(subcmd)
+        else:
+            print(f"  Unknown model or command: {subcmd}")
+            print("  Usage: /model, /model <name>, /model add <name> <url> <model> [api_key], /model remove <name>")
+
+    # Known input context limits for auto-detection
+    _KNOWN_LIMITS = {
+        "api.deepseek.com": 64000,   # V3: 64K input (1M total with cache)
+        "api.openai.com": 128000,    # GPT-4o: 128K
+        "openrouter.ai": 128000,     # varies by model
+    }
+
+    def _model_add(self, arg: str):
+        if not arg:
+            print("  Usage: /model add <name> <base_url> <model> [api_key] [--context-limit N]")
+            print("  Providers (base_url):")
+            print("    Local llama.cpp:  http://localhost:8080")
+            print("    OpenAI:           https://api.openai.com")
+            print("    DeepSeek:         https://api.deepseek.com")
+            print("    OpenRouter:       https://openrouter.ai/api")
+            print("  Examples:")
+            print("    /model add gpt4 https://api.openai.com gpt-4o sk-...")
+            print("    /model add deepseek https://api.deepseek.com deepseek-chat sk-...")
+            print("    /model add local8k http://localhost:8080 default --context-limit 8000")
+            return
+
+        parts = arg.split()
+        # Extract --context-limit
+        ctx_limit = None
+        filtered = []
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--context-limit" and i + 1 < len(parts):
+                try:
+                    ctx_limit = int(parts[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            else:
+                filtered.append(parts[i])
+                i += 1
+
+        if len(filtered) < 3:
+            print("  Error: need at least name, base_url, and model")
+            return
+
+        name = filtered[0]
+        base_url = filtered[1]
+        model = filtered[2]
+        api_key = filtered[3] if len(filtered) > 3 else None
+
+        # Auto-detect context limit from known providers
+        if ctx_limit is None:
+            for domain, limit in self._KNOWN_LIMITS.items():
+                if domain in base_url:
+                    ctx_limit = limit
+                    break
+
+        entry = {"base_url": base_url, "model": model}
+        if api_key:
+            entry["api_key"] = api_key
+        if ctx_limit:
+            entry["context_limit"] = ctx_limit
+
+        self._models[name] = entry
+        self._save_models()
+
+        # Test connection
+        client = LLMClient(base_url=base_url, model=model, api_key=api_key)
+        ok, msg = client.check_connection()
+        status = "connected" if ok else f"warning: {msg}"
+        print(f"  Added: {name} ({base_url} / {model}) — {status}")
+
+    def _model_remove(self, name: str):
+        if not name:
+            print("  Usage: /model remove <name>")
+            return
+        if name == "local":
+            print("  Cannot remove 'local' model")
+            return
+        if name not in self._models:
+            print(f"  Unknown model: {name}")
+            return
+        if name == self.active_model:
+            self._switch_model("local")
+        del self._models[name]
+        self._save_models()
+        print(f"  Removed: {name}")
 
     def _cmd_save(self, name: str = ""):
         """Save current session."""
@@ -641,18 +928,34 @@ class REPL:
 
     def _mcp_status(self):
         config_path = self.config.work_dir / ".aigent" / "mcp.json"
-        if not self._mcp_clients:
-            print("  No MCP servers connected")
+        mcp_config = getattr(self, "_mcp_config", {})
+
+        if not mcp_config and not self._mcp_clients:
+            print("  No MCP servers configured")
             print(f"  Config: {config_path}")
             print("  Add: /mcp add <name> <command> [args...]")
             return
-        for name, client in self._mcp_clients.items():
-            info = client.server_info or {}
-            n_tools = len(client.tools)
-            running = client._process and client._process.poll() is None
-            status = "running" if running else "stopped"
-            loaded = f" [loaded]" if f"mcp:{name}" in self.registry._loaded else ""
-            print(f"  {name}: {status}, {n_tools} tools ({info.get('name', '?')}){loaded}")
+
+        # Show all configured servers (connected or cached)
+        for name in sorted(set(list(mcp_config.keys()) + list(self._mcp_clients.keys()))):
+            category = f"mcp:{name}"
+            n_ext = len(self.registry._extensions.get(category, {}))
+
+            if name in self._mcp_clients:
+                client = self._mcp_clients[name]
+                running = client._process and client._process.poll() is None
+                status = "connected" if running else "stopped"
+                info = client.server_info or {}
+                server_name = info.get("name", "")
+                extra = f" ({server_name})" if server_name else ""
+            else:
+                status = "cached" if n_ext > 0 else "not cached"
+                extra = ""
+
+            loaded = " [loaded]" if category in self.registry._loaded else ""
+            print(f"  {name}: {status}, {n_ext} tools{extra}{loaded}")
+
+        print(f"  Config: {config_path}")
 
     def _mcp_add(self, arg: str):
         if not arg:
@@ -785,6 +1088,41 @@ class REPL:
 
         self._update_dynamic_descriptions()
 
+    def _print_stats(self):
+        """Show token usage stats across all sessions."""
+        stats = collect_stats(self.sessions_dir)
+        totals = stats["totals"]
+
+        if totals["requests"] == 0:
+            print("  No usage data yet")
+            return
+
+        def fmt(n):
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.1f}K"
+            return str(n)
+
+        print(f"\n  === Token Usage Stats ===\n")
+
+        # By model
+        print("  By model:")
+        for model, m in sorted(stats["by_model"].items()):
+            print(f"    {model}: {fmt(m['total'])} tokens"
+                  f" ({fmt(m['prompt'])} prompt + {fmt(m['completion'])} completion)"
+                  f" / {m['requests']} requests")
+
+        # By date
+        print(f"\n  By date:")
+        for date, d in stats["by_date"].items():
+            print(f"    {date}: {fmt(d['total'])} tokens / {d['requests']} requests")
+
+        # Totals
+        print(f"\n  Total: {fmt(totals['total'])} tokens"
+              f" ({fmt(totals['prompt'])} prompt + {fmt(totals['completion'])} completion)"
+              f" / {totals['requests']} requests")
+
     def _print_full_context(self):
         """Print the full conversation context."""
         msgs = self.context.get_messages()
@@ -815,22 +1153,21 @@ class REPL:
         """Main REPL loop."""
         print("=" * 50)
         print("Aigent — CLI AI Agent")
-        print(f"  Server:  {self.config.base_url}")
-        print(f"  Model:   {self.config.model}")
+        print(f"  Model:   {self.active_model} ({self.llm.base_url} / {self.llm.model})")
         print(f"  WorkDir: {self.config.work_dir}")
         print(f"  Session: {self.session_name}")
         print(f"  Stream:  {'on' if self.config.stream else 'off'}")
         print("=" * 50)
 
-        # Check connection
-        print("\nChecking server connection...")
+        # Check connection (non-fatal — user can switch model later)
+        print(f"\nChecking {self.active_model}...")
         ok, msg = self.llm.check_connection()
-        if not ok:
-            print(f"Error: {msg}")
-            print(f"Make sure llama-server is running on {self.config.base_url}")
-            sys.exit(1)
-        print(f"Connected ({msg})")
-        print("\nCommands: /clear /compact /undo /save /load /new /tools /mcp /context /history /exit")
+        if ok:
+            print(f"Connected ({msg})")
+        else:
+            print(f"Warning: {msg}")
+            print(f"Use /model to switch to another model")
+        print("\nCommands: /clear /compact /undo /drop /save /load /new /model /tools /mcp /stats /context /history /exit")
         print("-" * 50)
 
         self.log.session_start(
@@ -856,7 +1193,7 @@ class REPL:
                 if not self._handle_command(user_input):
                     cmd = user_input.split()[0]
                     print(f"  Unknown command: {cmd}")
-                    print("  Available: /clear /compact /undo /save /load /new /tools /mcp /context /history /exit")
+                    print("  Available: /clear /compact /undo /drop /save /load /new /model /tools /mcp /stats /context /history /exit")
                 continue
 
             # Agent loop

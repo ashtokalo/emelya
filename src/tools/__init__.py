@@ -132,7 +132,22 @@ class ToolRegistry:
             return f"Error: unknown tool '{name}'"
 
         if "_raw_error" in args:
-            return f"Error: invalid JSON in arguments: {args['_raw_error']}"
+            return (
+                f"Error: invalid JSON in arguments (truncated or broken escaping). "
+                "Split large content into smaller pieces or avoid special characters in strings."
+            )
+
+        # Validate required parameters from tool definition
+        tool_def = all_tools[name]["definition"]
+        required = tool_def.get("function", {}).get("parameters", {}).get("required", [])
+        missing = [r for r in required if r not in args]
+        if missing:
+            got = list(args.keys())
+            return (
+                f"Error: missing required parameters: {', '.join(missing)} "
+                f"(got: {', '.join(got) if got else 'none'}). "
+                "Arguments were likely truncated. Use smaller content."
+            )
 
         try:
             return all_tools[name]["execute"](args, ctx)

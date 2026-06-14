@@ -7,7 +7,8 @@ DEFINITION = {
         "description": (
             "Find and replace exact text in a file. "
             "The old_string must match exactly (including whitespace and indentation). "
-            "You MUST read the file first."
+            "You MUST read the file first. "
+            "Max 30 lines per edit — for larger changes use write to rewrite the whole file."
         ),
         "parameters": {
             "type": "object",
@@ -40,6 +41,17 @@ def execute(args: dict, ctx) -> str:
     old_string = args["old_string"]
     new_string = args["new_string"]
     replace_all = args.get("replace_all", False)
+
+    # Guard against overly large edits that break JSON serialization
+    max_lines = 30
+    old_lines = old_string.count("\n") + 1
+    new_lines = new_string.count("\n") + 1
+    if old_lines > max_lines or new_lines > max_lines:
+        return (
+            f"Error: edit too large ({old_lines}+{new_lines} lines). "
+            f"Max {max_lines} lines per edit. Split into smaller edits, "
+            "or use write to rewrite the entire file."
+        )
 
     if not path.exists():
         return f"Error: file not found: {args['path']}"

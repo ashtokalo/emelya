@@ -1,7 +1,8 @@
-"""LLM client — HTTP communication with llama.cpp server via urllib."""
+"""LLM client — HTTP communication with OpenAI-compatible API via urllib."""
 
 import json
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -12,33 +13,55 @@ class LLMError(Exception):
 
 
 class LLMClient:
-    """HTTP client for OpenAI-compatible llama.cpp server."""
+    """HTTP client for OpenAI-compatible API (llama.cpp, OpenAI, DeepSeek, OpenRouter)."""
 
     def __init__(self, base_url: str, model: str = "default",
+                 api_key: str = None,
                  retry: int = 2, retry_delay: float = 2.0):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.api_key = api_key
         self.retry = retry
         self.retry_delay = retry_delay
 
     def check_connection(self) -> tuple:
-        """Check server availability. Returns (ok, message)."""
+        """Check server availability. Returns (ok, info_message)."""
+        # Try /v1/models first (returns model list), then /health (llama.cpp)
+        try:
+            req = urllib.request.Request(f"{self.base_url}/v1/models")
+            if self.api_key:
+                req.add_header("Authorization", f"Bearer {self.api_key}")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    models = data.get("data", [])
+                    if models:
+                        ids = [m.get("id", "?") for m in models[:5]]
+                        return True, f"models: {', '.join(ids)}"
+                    return True, "OK"
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                return False, "Authentication failed (invalid API key)"
+        except Exception:
+            pass
+        # Fallback: /health (llama.cpp)
         try:
             req = urllib.request.Request(f"{self.base_url}/health")
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 if resp.status == 200:
                     return True, "OK"
-                return False, f"Health check returned {resp.status}"
-        except Exception as e:
-            return False, f"Server unavailable: {e}"
+        except Exception:
+            pass
+        return False, "Server unavailable"
 
     def _post(self, url: str, data: dict, timeout: int = 120):
         """Raw POST, returns http.client.HTTPResponse (not closed)."""
         body = json.dumps(data).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
-            url, data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            url, data=body, headers=headers, method="POST",
         )
         return urllib.request.urlopen(req, timeout=timeout)
 
@@ -50,25 +73,54 @@ class LLMClient:
     @staticmethod
     def _repair_json(raw: str) -> dict:
         """Try to parse JSON, attempt simple repairs if it fails."""
+        import re
+
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
             pass
+
         # Remove trailing commas before } or ]
-        import re
         cleaned = re.sub(r",\s*([}\]])", r"\1", raw)
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
             pass
-        # Try closing unclosed braces
+
+        # Try closing unclosed braces/brackets
         opens = raw.count("{") - raw.count("}")
         if opens > 0:
-            cleaned = raw + "}" * opens
+            # Close unclosed string if needed
+            quote_count = raw.count('"') - raw.count('\\"')
+            suffix = '"' if quote_count % 2 != 0 else ""
+            suffix += "}" * opens
             try:
-                return json.loads(cleaned)
+                return json.loads(raw + suffix)
             except json.JSONDecodeError:
                 pass
+
+        # Truncated string value — find last complete key-value pair
+        # Match pattern: {"key1": "val1", "key2": "val2", "key3": "trunca...
+        # Strategy: find the last complete "key": "value" and close the object
+        match = re.search(r'^(\{.*"[^"]+"\s*:\s*"(?:[^"\\]|\\.)*")\s*,\s*"[^"]*"?\s*:\s*"[^"]*$', raw, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1) + "}")
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort — try to find any valid JSON prefix
+        for end_pos in range(len(raw) - 1, 0, -1):
+            if raw[end_pos] in ('"', '}', ']'):
+                candidate = raw[:end_pos + 1]
+                # Try closing
+                opens_c = candidate.count("{") - candidate.count("}")
+                if opens_c >= 0:
+                    try:
+                        return json.loads(candidate + "}" * opens_c)
+                    except json.JSONDecodeError:
+                        continue
+
         raise json.JSONDecodeError(f"Cannot parse tool arguments", raw, 0)
 
     @staticmethod
@@ -114,14 +166,27 @@ class LLMClient:
             try:
                 resp = self._post_json(url, data)
                 msg = resp["choices"][0]["message"]
-                usage = resp.get("usage")  # {prompt_tokens, completion_tokens, total_tokens}
+                usage = resp.get("usage")
                 return {
                     "content": msg.get("content"),
                     "tool_calls": self._parse_tool_calls(msg["tool_calls"]) if msg.get("tool_calls") else None,
                     "raw": msg,
                     "usage": usage,
+                    "model_id": resp.get("model"),
                 }
-            except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            except urllib.error.HTTPError as e:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", errors="replace")[:500]
+                except Exception:
+                    pass
+                last_err = e
+                self._dump_failed_request(data, f"HTTP {e.code}: {body}")
+                if e.code in (400, 422):
+                    raise LLMError(f"API error {e.code}: {body}")
+                if attempt < self.retry:
+                    time.sleep(self.retry_delay)
+            except (urllib.error.URLError, socket.timeout, ConnectionError, ssl.SSLError, OSError) as e:
                 last_err = e
                 if attempt < self.retry:
                     time.sleep(self.retry_delay)
@@ -129,6 +194,46 @@ class LLMClient:
                 raise LLMError(f"Unexpected API response format: {e}")
 
         raise LLMError(f"Connection failed after {self.retry + 1} attempts: {last_err}")
+
+    @staticmethod
+    def _dump_failed_request(data: dict, error: str):
+        """Dump failed request to /tmp for debugging."""
+        import os
+        from pathlib import Path
+        dump_dir = Path("/tmp/aigent_debug")
+        dump_dir.mkdir(exist_ok=True)
+        ts = time.strftime("%H%M%S")
+        dump_path = dump_dir / f"request_{ts}.json"
+        try:
+            # Summarize messages to avoid huge dumps
+            summary = {
+                "error": error,
+                "model": data.get("model"),
+                "stream": data.get("stream"),
+                "n_tools": len(data.get("tools") or []),
+                "n_messages": len(data.get("messages", [])),
+                "messages": [],
+            }
+            for m in data.get("messages", []):
+                role = m.get("role", "?")
+                content_len = len(m.get("content") or "")
+                tc = len(m.get("tool_calls") or [])
+                tid = m.get("tool_call_id", "")
+                entry = {"role": role, "content_len": content_len}
+                if tc:
+                    entry["tool_calls"] = tc
+                if tid:
+                    entry["tool_call_id"] = tid
+                # Include first/last messages in full
+                if role in ("system",) or len(summary["messages"]) < 2:
+                    entry["content_preview"] = (m.get("content") or "")[:200]
+                summary["messages"].append(entry)
+            # Also dump full request for detailed analysis
+            dump_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+            full_path = dump_dir / f"request_{ts}_full.json"
+            full_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
     def stream_chat(self, messages: list, tools: list = None,
                     temperature: float = 0.7, max_tokens: int = 1024,
@@ -193,7 +298,19 @@ class LLMClient:
                     "raw": raw,
                     "usage": usage,
                 }
-            except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+            except urllib.error.HTTPError as e:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", errors="replace")[:500]
+                except Exception:
+                    pass
+                last_err = e
+                self._dump_failed_request(data, f"HTTP {e.code}: {body}")
+                if e.code in (400, 422):
+                    raise LLMError(f"API error {e.code}: {body}")
+                if attempt < self.retry:
+                    time.sleep(self.retry_delay)
+            except (urllib.error.URLError, socket.timeout, ConnectionError, ssl.SSLError, OSError) as e:
                 last_err = e
                 if attempt < self.retry:
                     time.sleep(self.retry_delay)
@@ -207,55 +324,59 @@ class LLMClient:
         tc_accum = {}
         usage = None
 
-        for raw_line in resp:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            if line == "data: [DONE]":
-                break
-            if not line.startswith("data: "):
-                continue
+        try:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                if line == "data: [DONE]":
+                    break
+                if not line.startswith("data: "):
+                    continue
 
-            try:
-                chunk = json.loads(line[6:])
-            except json.JSONDecodeError:
-                continue
+                try:
+                    chunk = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
 
-            # Usage may come in final chunk
-            if "usage" in chunk:
-                usage = chunk["usage"]
+                # Usage may come in final chunk
+                if "usage" in chunk:
+                    usage = chunk["usage"]
 
-            choices = chunk.get("choices")
-            if not choices:
-                continue
-            delta = choices[0].get("delta", {})
+                choices = chunk.get("choices")
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
 
-            # Content delta
-            text = delta.get("content")
-            if text:
-                content_parts.append(text)
-                if on_content:
-                    on_content(text)
+                # Content delta
+                text = delta.get("content")
+                if text:
+                    content_parts.append(text)
+                    if on_content:
+                        on_content(text)
 
-            # Tool call deltas
-            tc_deltas = delta.get("tool_calls")
-            if tc_deltas:
-                for tcd in tc_deltas:
-                    idx = tcd.get("index", 0)
-                    if idx not in tc_accum:
-                        tc_accum[idx] = {
-                            "id": tcd.get("id", ""),
-                            "name": "",
-                            "_arguments": "",
-                        }
-                    entry = tc_accum[idx]
-                    if tcd.get("id"):
-                        entry["id"] = tcd["id"]
-                    fn = tcd.get("function", {})
-                    if fn.get("name"):
-                        entry["name"] = fn["name"]
-                    if fn.get("arguments"):
-                        entry["_arguments"] += fn["arguments"]
+                # Tool call deltas
+                tc_deltas = delta.get("tool_calls")
+                if tc_deltas:
+                    for tcd in tc_deltas:
+                        idx = tcd.get("index", 0)
+                        if idx not in tc_accum:
+                            tc_accum[idx] = {
+                                "id": tcd.get("id", ""),
+                                "name": "",
+                                "_arguments": "",
+                            }
+                        entry = tc_accum[idx]
+                        if tcd.get("id"):
+                            entry["id"] = tcd["id"]
+                        fn = tcd.get("function", {})
+                        if fn.get("name"):
+                            entry["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            entry["_arguments"] += fn["arguments"]
+        except (ssl.SSLError, OSError, ConnectionError):
+            # Stream interrupted — return what we have so far
+            pass
 
         content = "".join(content_parts)
         tool_calls = [tc_accum[i] for i in sorted(tc_accum)] if tc_accum else None

@@ -3,16 +3,17 @@
 ## Цель
 
 Консольный AI-агент для диалоговой работы с файлами (программирование, анализ, отладка).
-Использует локальную LLM через llama.cpp сервер с поддержкой function calling (tool use).
+Поддерживает локальные и облачные LLM через OpenAI-совместимый API (llama.cpp, OpenAI, DeepSeek, OpenRouter).
 
 ## Принципы
 
 1. **Только стандартная библиотека Python** — никаких pip-зависимостей
 2. **Код отдельно, тексты отдельно** — системные промпты, навыки, агенты в .md файлах
 3. **Tool calling вместо парсинга текста** — OpenAI-совместимый API функций
-4. **Минимум core tools** — базовый набор всегда в контексте, расширения через load_tools
-5. **Work context isolation** — tool calls не попадают в основной контекст
-6. **Безопасность** — sandbox для файловых операций, подтверждение команд
+4. **Multi-model** — конфигурация в models.json, переключение через /model или --use
+5. **Минимум core tools** — базовый набор всегда в контексте, расширения через load_tools
+6. **Work context isolation** — tool calls не попадают в основной контекст
+7. **Безопасность** — sandbox для файловых операций, подтверждение команд
 
 ## Компоненты
 
@@ -34,9 +35,9 @@
                        ▼
 ┌─────────────────────────────────────────────────┐
 │                 LLM Client                       │
-│  HTTP → llama.cpp /v1/chat/completions           │
+│  HTTP → /v1/chat/completions (любой API)         │
 │  стриминг (SSE) + обычный режим                  │
-│  retry, JSON repair, real token counts           │
+│  retry, JSON repair, SSL recovery, token counts  │
 └──────────────────────┬──────────────────────────┘
                        │
               ┌────────┴────────┐
@@ -83,21 +84,43 @@ User input
        → в основной Context сохраняется ТОЛЬКО финальный текст
 ```
 
+## Multi-Model
+
+Конфигурация моделей в `models.json`. Каждая запись — именованный провайдер с host, port, api_key, model.
+Поддерживаются llama.cpp (локальный), OpenAI, DeepSeek, OpenRouter и любой OpenAI-совместимый API.
+
+- **CLI**: `--use NAME` — запуск с конкретной моделью
+- **Команда**: `/model [NAME]` — переключение в рантайме (без аргументов — список моделей)
+- **Промпт**: отображает активную модель: `Aigent(local, 350 tok):` или `Aigent(deepseek, 350 tok):`
+
+### Edit tool limit
+
+Для облачных моделей edit ограничен 30 строками на операцию. Это предотвращает обрезку JSON при генерации длинных old_string/new_string.
+
+### Consecutive error detection
+
+После 3 ошибок подряд система вставляет сообщение, заставляющее модель сменить подход.
+
+### Required parameter validation
+
+Валидация обязательных параметров централизована в ToolRegistry. При пропуске параметра возвращается информативное сообщение с указанием на возможную обрезку JSON.
+
 ## Структура файлов
 
 ```
 aigent/
+├── models.json                    — конфигурация моделей (multi-model)
 ├── src/                           — 4100 строк Python
 │   ├── __main__.py                — точка входа
 │   ├── config.py                  — CLI аргументы
 │   ├── repl.py                    — REPL + агентский цикл + сессии + MCP управление
-│   ├── llm.py                     — HTTP клиент (urllib, стриминг)
+│   ├── llm.py                     — HTTP клиент (urllib, стриминг, SSL recovery)
 │   ├── context.py                 — контекст (сообщения, trimming, save/load)
 │   ├── sandbox.py                 — валидация путей
 │   ├── log.py                     — детальное логирование сессий
 │   ├── mcp.py                     — MCP клиент (stdio, JSON-RPC 2.0)
 │   └── tools/
-│       ├── __init__.py            — ToolRegistry (core/extension/MCP)
+│       ├── __init__.py            — ToolRegistry (core/extension/MCP, parameter validation)
 │       ├── read.py                — чтение файлов (core)
 │       ├── write.py               — создание/перезапись (core)
 │       ├── edit.py                — find-and-replace (core)
@@ -167,10 +190,9 @@ MCP tools:              +100-200 токенов  (на категорию, из 
 
 ### Trimming
 
-Когда оценка токенов превышает context_limit:
-- Удаляются самые старые пары user/assistant
-- System prompt никогда не удаляется
-- Используются реальные token counts из `usage` если доступны
+Основной контекст: когда оценка токенов превышает context_limit, удаляются самые старые пары user/assistant. System prompt никогда не удаляется. Используются реальные token counts из `usage` если доступны.
+
+Work context: автоматически обрезается при достижении 80% от context_limit. Удаляются самые старые tool call/result пары из work context, предотвращая переполнение при длинных цепочках tool calls.
 
 ### Compact
 

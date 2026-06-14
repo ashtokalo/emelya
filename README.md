@@ -1,14 +1,16 @@
-# Aigent — CLI AI Agent for Local LLMs
+# Aigent — CLI AI Agent for Local and Cloud LLMs
 
-Interactive command-line AI agent that works with local models via llama.cpp.
+Interactive command-line AI agent that works with local and cloud models via OpenAI-compatible API.
 Designed for programming, file analysis, debugging, and general-purpose tasks.
 
 ## Key Features
 
-- **Fully local** — no cloud, no API keys, no internet required for core functionality
-- **Any model** — works with any model running on llama.cpp server (Qwen, Llama, Mistral, Gemma, etc.)
+- **Multi-model** — supports llama.cpp (local), OpenAI, DeepSeek, OpenRouter, and any OpenAI-compatible API
+- **Any model** — works with Qwen, Llama, Mistral, Gemma, GPT, DeepSeek, and more
 - **Tool calling** — structured function calling, not text parsing
 - **Work context isolation** — tool calls don't pollute the main context (critical for 8-32K models)
+- **Auto context trimming** — automatically trims work context when approaching 80% of context_limit
+- **Consecutive error detection** — after 3 errors in a row, forces the model to change approach
 - **Dynamic tool loading** — extension tools loaded on demand via `load_tools`
 - **MCP support** — connect external services with lazy loading and cached descriptions
 - **Sessions** — save/load/autosave conversations
@@ -17,16 +19,65 @@ Designed for programming, file analysis, debugging, and general-purpose tasks.
 ## Quick Start
 
 ```bash
-# Start llama.cpp server
+# Local model via llama.cpp
 llama-server -m model.gguf -c 8192
-
-# Run aigent
 ./run.sh
+
+# Use a specific configured model
+./run.sh --use deepseek
 
 # With options
 ./run.sh --host 192.168.1.100 --port 9090 --work-dir /path/to/project
 ./run.sh --confirm none --no-stream --context-limit 32000
 ```
+
+## Multi-Model Support
+
+Configure models in `models.json`:
+
+```json
+{
+  "local": {
+    "host": "localhost",
+    "port": 8080
+  },
+  "deepseek": {
+    "host": "api.deepseek.com",
+    "api_key": "sk-..."
+  },
+  "openrouter": {
+    "host": "openrouter.ai",
+    "api_key": "sk-or-...",
+    "model": "anthropic/claude-3.5-sonnet"
+  }
+}
+```
+
+Switch models at runtime with `/model` command or at startup with `--use NAME`.
+
+The prompt displays the active model name: `Aigent(local, 350 tok):` or `Aigent(deepseek, 350 tok):`.
+
+### GigaChat, YandexGPT and other non-OpenAI providers
+
+Providers with incompatible APIs (GigaChat, YandexGPT, etc.) can be connected via [LiteLLM](https://github.com/BerriAI/litellm) proxy:
+
+```bash
+pip install litellm
+
+# GigaChat (Sber)
+GIGACHAT_API_KEY=... litellm --model gigachat/GigaChat-Pro --port 4000
+
+# YandexGPT
+YANDEX_API_KEY=... litellm --model yandex/yandexgpt --port 4000
+```
+
+Then in aigent:
+```
+/model add gigachat http://localhost:4000 GigaChat-Pro
+/model add yandex http://localhost:4000 yandexgpt
+```
+
+LiteLLM supports 100+ providers and exposes a standard OpenAI-compatible API.
 
 ## Tools
 
@@ -36,7 +87,7 @@ llama-server -m model.gguf -c 8192
 |------|-------------|
 | `read` | Read text files with line numbers |
 | `write` | Create or overwrite files (requires read first) |
-| `edit` | Find-and-replace by exact string match |
+| `edit` | Find-and-replace by exact string match (max 30 lines per edit) |
 | `bash` | Execute shell commands with confirmation |
 | `glob` | Find files by name pattern |
 | `grep` | Search file contents with regex |
@@ -99,6 +150,9 @@ Instructions loaded into context on demand. Model decides when to load them.
 | `/save [name]` | Save session |
 | `/load [name]` | Load session (no args = list sessions) |
 | `/new [name]` | Start new session |
+| `/model [name]` | Switch active model (no args = list models) |
+| `/drop` | Drop last message pair from context |
+| `/stats` | Show session statistics |
 | `/tools` | Show loaded tools and extensions |
 | `/mcp` | MCP server status |
 | `/mcp add <name> <cmd>` | Add MCP server |
@@ -112,6 +166,7 @@ Instructions loaded into context on demand. Model decides when to load them.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
+| `--use` | | Use a named model from `models.json` |
 | `--host` | localhost | llama.cpp server host |
 | `--port` | 8080 | llama.cpp server port |
 | `--model` | default | Model name |
@@ -130,13 +185,13 @@ src/                          — 4100 lines Python, stdlib only
 ├── __main__.py               — entry point
 ├── config.py                 — CLI args
 ├── repl.py                   — REPL + agent loop + session management
-├── llm.py                    — HTTP client (urllib) with streaming
+├── llm.py                    — HTTP client (urllib) with streaming, SSL error recovery
 ├── context.py                — message history, trimming, save/load
 ├── sandbox.py                — path validation
 ├── log.py                    — detailed session logging
 ├── mcp.py                    — MCP client (stdio JSON-RPC)
 └── tools/                    — tool registry + 16 tools
-    ├── __init__.py            — ToolRegistry (core/extension separation)
+    ├── __init__.py            — ToolRegistry (core/extension, parameter validation)
     ├── read.py, write.py, edit.py
     ├── bash.py, glob_tool.py, grep.py, list_dir.py
     ├── web_fetch.py, skill.py, agent.py, load_tools.py
@@ -144,6 +199,7 @@ src/                          — 4100 lines Python, stdlib only
     ├── hex_read.py, hex_write.py         (ext: binary)
     └── archive.py                        (ext: archives)
 
+models.json                   — multi-model configuration
 prompts/system.md             — system prompt template
 skills/*.md                   — 15 skill files
 agents/*.md                   — 14 agent templates
@@ -159,6 +215,9 @@ docs/                         — architecture documentation
 The agent uses **work context isolation**: when the model calls tools, the tool calls and results
 live in a temporary work context. Only the user message and final text response are saved to the
 main context. This is critical for small models with 8-32K context windows.
+
+Work context is **auto-trimmed** when it approaches 80% of context_limit, preventing overflows
+during long tool-calling chains.
 
 ### Token Budget (typical 8K model)
 
@@ -182,4 +241,5 @@ Use ruff for linting.
 ## Requirements
 
 - Python 3.8+
-- llama.cpp server with a model that supports tool calling (Qwen 2.5/3, Llama 3.1+, Mistral 7B v0.3+)
+- Any OpenAI-compatible API: llama.cpp, OpenAI, DeepSeek, OpenRouter, etc.
+- Model must support tool calling (Qwen 2.5/3, Llama 3.1+, Mistral 7B v0.3+, GPT-4o, DeepSeek-V3, etc.)

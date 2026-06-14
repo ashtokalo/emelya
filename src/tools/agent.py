@@ -68,6 +68,12 @@ def _parse_agent(content: str) -> tuple:
 def execute(args: dict, ctx) -> str:
     name = args.get("name", "")
     agent_args = args.get("args", {})
+    # Some providers return args as string instead of dict
+    if isinstance(agent_args, str):
+        try:
+            agent_args = json.loads(agent_args)
+        except (json.JSONDecodeError, ValueError):
+            agent_args = {}
 
     if not ctx.agents_dir:
         return "Error: agents directory not configured"
