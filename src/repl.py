@@ -422,41 +422,6 @@ class REPL:
         )
         return response
 
-    @staticmethod
-    def _trim_work_context(messages: list) -> list:
-        """Trim work context while keeping tool_call/tool groups intact.
-
-        Groups: [assistant with tool_calls] + [tool results for those calls]
-        Never split a group — either keep it whole or remove it entirely.
-        Keep: first 2 messages (system + user) + last complete group.
-        """
-        # Find group boundaries: each group starts with an assistant message
-        # that has tool_calls, followed by tool result messages
-        head = messages[:2]  # system + user (always keep)
-        rest = messages[2:]
-
-        # Split rest into groups
-        groups = []
-        current = []
-        for msg in rest:
-            if msg.get("role") == "assistant" and current:
-                groups.append(current)
-                current = []
-            current.append(msg)
-        if current:
-            groups.append(current)
-
-        if not groups:
-            return messages
-
-        # Keep last 2 groups (last exchange + current)
-        keep = 2 if len(groups) >= 2 else 1
-        kept = []
-        for g in groups[-keep:]:
-            kept.extend(g)
-
-        return head + kept
-
     def _agent_loop(self, user_input: str):
         """Run the agent loop with work context isolation.
 
@@ -465,8 +430,7 @@ class REPL:
         """
         self.context.add_user(user_input)
 
-        # Trim context if needed
-        self.context.trim()
+        # No auto-trim — user controls context size via /compact and /clear
 
         # First call — from main context (update usage for accurate token tracking)
         tools = self.registry.get_tools()
@@ -535,15 +499,6 @@ class REPL:
                 })
                 consecutive_errors = 0
 
-            # Trim work context if too large, respecting tool_call/tool boundaries
-            work_size = 0
-            for m in work_messages:
-                work_size += len(m.get("content") or "")
-                if m.get("tool_calls"):
-                    work_size += len(json.dumps(m["tool_calls"]))
-            work_token_est = int(work_size / 3.5) + 1200  # +1200 for tool definitions
-            if work_token_est > self.context.context_limit * 0.7 and len(work_messages) > 6:
-                work_messages = self._trim_work_context(work_messages)
 
             # Next LLM call in work context (refresh tools — load_tools may have added new ones)
             tools = self.registry.get_tools()
