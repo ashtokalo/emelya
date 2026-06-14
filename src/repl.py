@@ -500,6 +500,19 @@ class REPL:
                 consecutive_errors = 0
 
 
+            # Progressive nudges — inserted BEFORE the LLM call, AFTER all tool results
+            remaining = self.config.max_iterations - iteration - 1
+            if remaining == 3:
+                work_messages.append({
+                    "role": "user",
+                    "content": "IMPORTANT: Only 3 steps left. Start composing your answer.",
+                })
+            elif remaining == 1:
+                work_messages.append({
+                    "role": "user",
+                    "content": "LAST STEP. Give your final answer NOW. Do not call any more tools.",
+                })
+
             # Next LLM call in work context (refresh tools — load_tools may have added new ones)
             tools = self.registry.get_tools()
             try:
@@ -507,6 +520,7 @@ class REPL:
             except LLMError as e:
                 print(f"\nError: {e}")
                 self.log.event(f"Error: {e}")
+                final_text = final_text or f"(Error during processing: {e})"
                 break
             except KeyboardInterrupt:
                 print("\n  (interrupted)")
@@ -520,19 +534,6 @@ class REPL:
             tool_calls = response.get("tool_calls")
             if not tool_calls:
                 break  # Final text response
-
-            # Progressive nudges to stop endless research
-            remaining = self.config.max_iterations - iteration - 1
-            if remaining == 3:
-                work_messages.append({
-                    "role": "user",
-                    "content": "IMPORTANT: Only 3 steps left. Start composing your answer.",
-                })
-            elif remaining == 1:
-                work_messages.append({
-                    "role": "user",
-                    "content": "LAST STEP. Give your final answer NOW. Do not call any more tools.",
-                })
         else:
             # Max iterations — force final response without tools
             print("\n  (max iterations, forcing answer...)")

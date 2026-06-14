@@ -40,3 +40,16 @@ class Sandbox:
         raise PermissionError(
             f"Access denied: '{path}' is outside working directory"
         )
+
+    def suggest_path(self, path: str) -> str:
+        """If file not found, try to suggest a similar existing path."""
+        from pathlib import PurePosixPath
+        parts = PurePosixPath(path).parts
+        # Try removing each directory level: src/aigent/repl.py → src/repl.py
+        for i in range(len(parts) - 1):
+            for skip in range(len(parts) - 1):
+                candidate_parts = parts[:skip] + parts[skip + 1:]
+                candidate = str(Path(*candidate_parts)) if candidate_parts else ""
+                if candidate and (self.work_dir / candidate).exists():
+                    return candidate
+        return ""

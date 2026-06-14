@@ -41,6 +41,9 @@ def execute(args: dict, ctx) -> str:
     path = ctx.sandbox.validate(args["path"])
 
     if not path.exists():
+        hint = ctx.sandbox.suggest_path(args["path"])
+        if hint:
+            return f"Error: file not found: {args['path']}. Did you mean: {hint}?"
         return f"Error: file not found: {args['path']}"
     if path.is_dir():
         return f"Error: '{args['path']}' is a directory, not a file"
