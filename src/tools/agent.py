@@ -101,16 +101,32 @@ def execute(args: dict, ctx) -> str:
         return f"Error loading agent '{name}': {e}"
 
     # Substitute args into prompt template
+    # If template has {task} but args has description/question — remap
     try:
         prompt = body.format_map(agent_args)
-    except KeyError as e:
-        return f"Error: missing argument {e} for agent '{name}'"
+    except KeyError:
+        # Try common aliases: task/description/question are interchangeable
+        remapped = dict(agent_args)
+        first_val = next(iter(agent_args.values()), "") if agent_args else ""
+        for key in ("task", "description", "question", "target", "path", "symbol", "error"):
+            if key not in remapped:
+                remapped[key] = first_val
+        try:
+            prompt = body.format_map(remapped)
+        except KeyError as e:
+            return f"Error: missing argument {e} for agent '{name}'"
 
     allowed_tools = meta.get("tools", ["read", "glob", "grep"])
     max_steps = meta.get("max_steps", 5)
 
     # Nested agents only if explicitly listed in frontmatter tools
     next_depth = ctx.agent_depth + 1
+
+    # Special handling for planner — collect plan_steps
+    is_planner = name == "planner"
+    if is_planner:
+        from tools.plan_step import reset as plan_reset, get_steps
+        plan_reset()
 
     depth_str = f" (depth {next_depth})" if next_depth > 1 else ""
     try:
@@ -119,7 +135,7 @@ def execute(args: dict, ctx) -> str:
     except ImportError:
         print(f"\n  [agent: {name}{depth_str}] Running...", flush=True)
 
-    return _run_agent_loop(
+    text_result = _run_agent_loop(
         prompt=prompt,
         allowed_tools=allowed_tools,
         max_steps=max_steps,
@@ -127,6 +143,13 @@ def execute(args: dict, ctx) -> str:
         depth=next_depth,
         agent_name=name,
     )
+
+    # If planner — return plan as JSON instead of text
+    if is_planner:
+        steps = get_steps()
+        if steps:
+            return json.dumps({"plan": steps, "summary": text_result}, ensure_ascii=False)
+    return text_result
 
 
 def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,

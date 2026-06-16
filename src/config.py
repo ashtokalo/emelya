@@ -39,10 +39,10 @@ def parse_args(argv=None) -> Config:
     parser.add_argument("--use", default=None, metavar="NAME",
                         help="Use a named model from .emelya/models.json")
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--context-limit", type=int, default=8000)
     parser.add_argument("--work-dir", default=".")
-    parser.add_argument("--max-iterations", type=int, default=20)
+    parser.add_argument("--max-iterations", type=int, default=10)
     parser.add_argument("--no-stream", action="store_true")
     parser.add_argument(
         "--confirm",

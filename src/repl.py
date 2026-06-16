@@ -611,6 +611,18 @@ class REPL:
                 elapsed = int((_time.monotonic() - t0) * 1000)
 
                 self.log.tool_exec(tc["name"], tc["args"], result, elapsed)
+
+                # Intercept planner result — execute plan
+                if (tc["name"] == "agent"
+                        and tc["args"].get("name") == "planner"
+                        and '{"plan":' in result[:50]):
+                    try:
+                        plan_data = json.loads(result)
+                        plan_result = self._execute_plan(plan_data.get("plan", []))
+                        result = plan_result
+                    except (json.JSONDecodeError, Exception) as e:
+                        result = f"Plan execution error: {e}\nRaw plan: {result[:500]}"
+
                 self._print_tool_result(tc["name"], result)
                 work_messages.append({
                     "role": "tool",
@@ -690,6 +702,109 @@ class REPL:
 
         # Autosave session
         self._autosave()
+
+    def _execute_plan(self, steps: list) -> str:
+        """Execute a plan created by planner agent. Returns summary."""
+        if not steps:
+            return "Empty plan"
+
+        tmp_dir = self._session_dir() / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        results = {}  # output_file → {"size": N, "ok": bool}
+        failed_outputs = set()  # output files from failed steps
+        total = len(steps)
+        completed = 0
+
+        for i, step in enumerate(steps):
+            desc = step.get("description", f"Step {i + 1}")
+            agent_name = step.get("agent")
+            tool_name = step.get("tool")
+            args = step.get("args", {})
+            output_file = step.get("output")
+            uses = step.get("uses", [])
+
+            # Skip if any dependency failed
+            missing_deps = [u for u in uses if u in failed_outputs]
+            if missing_deps:
+                print(f"\n  {C.warning}[{i + 1}/{total}]{C.reset} {desc}")
+                print(f"  {C.tool_error}Skipped — depends on failed: {', '.join(missing_deps)}{C.reset}")
+                if output_file:
+                    failed_outputs.add(output_file)
+                    results[output_file] = {"size": 0, "ok": False, "reason": "skipped"}
+                continue
+
+            print(f"\n  {C.info}[{i + 1}/{total}]{C.reset} {desc}")
+
+            # Inject content from previous step outputs
+            if uses and (agent_name or tool_name):
+                context_parts = []
+                for use_file in uses:
+                    use_path = tmp_dir / use_file
+                    if use_path.exists():
+                        content = use_path.read_text(encoding="utf-8")
+                        context_parts.append(f"--- {use_file} ---\n{content}")
+                if context_parts:
+                    extra_context = "\n\n".join(context_parts)
+                    if agent_name:
+                        current_args = args.copy()
+                        for key in ("task", "question", "target", "path", "symbol"):
+                            if key in current_args:
+                                current_args[key] = current_args[key] + f"\n\nContext from previous steps:\n{extra_context}"
+                                break
+                        else:
+                            current_args["context"] = extra_context
+                        args = current_args
+
+            # Execute
+            is_error = False
+            try:
+                if agent_name:
+                    result = self.registry.execute("agent", {
+                        "name": agent_name,
+                        "args": args,
+                    }, self.tool_ctx)
+                elif tool_name:
+                    result = self.registry.execute(tool_name, args, self.tool_ctx)
+                else:
+                    result = f"Step has no agent or tool: {desc}"
+                    is_error = True
+            except KeyboardInterrupt:
+                result = "Cancelled by user"
+                print(f"  {C.warning}Plan interrupted at step {i + 1}{C.reset}")
+                if output_file:
+                    failed_outputs.add(output_file)
+                break
+            except Exception as e:
+                result = f"Error: {e}"
+                is_error = True
+
+            if result.startswith("Error:") or result.startswith("Agent error:"):
+                is_error = True
+
+            # Save to tmp file
+            if output_file:
+                out_path = tmp_dir / output_file
+                out_path.write_text(result, encoding="utf-8")
+                results[output_file] = {"size": len(result), "ok": not is_error}
+                if is_error:
+                    failed_outputs.add(output_file)
+                    print(f"  {C.tool_error}Failed: {result[:100]}{C.reset}")
+                else:
+                    print(f"  {C.muted}→ {output_file} ({len(result)} chars){C.reset}")
+                    completed += 1
+            else:
+                completed += 1
+
+        # Summary
+        failed = len(failed_outputs)
+        skipped = sum(1 for r in results.values() if isinstance(r, dict) and r.get("reason") == "skipped")
+        parts = [f"Plan: {completed} done, {failed} failed, {skipped} skipped (of {total})."]
+        parts.append(f"Temp files: {tmp_dir}")
+        for fname, info in results.items():
+            if isinstance(info, dict):
+                status = "OK" if info["ok"] else ("skipped" if info.get("reason") == "skipped" else "FAILED")
+                parts.append(f"  {fname}: {info['size']} chars [{status}]")
+        return "\n".join(parts)
 
     def _autosave(self):
         """Save context to current session directory."""

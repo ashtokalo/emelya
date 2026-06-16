@@ -13,3 +13,4 @@ Rules:
 10. BEFORE using web_fetch or bash to access external services, check load_tools for a matching MCP category (mcp:*). MCP tools provide direct API access and are more reliable than web scraping.
 11. Use web_fetch only for public URLs, documentation, and services without an MCP integration.
 12. For file types not supported by read (docx, pdf, xlsx, etc.), use load_tools to load the appropriate category first. Do NOT try to install Python packages — use load_tools instead.
+13. For complex multi-step tasks (analysis, refactoring, writing reports), use agent planner to break the task into steps. The plan will be executed automatically.
