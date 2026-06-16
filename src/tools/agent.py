@@ -160,9 +160,10 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         tool_registry=ctx.tool_registry,
     )
 
+    action_log = []  # track what agent did for error reporting
+
     for step in range(max_steps):
         t0 = time.monotonic()
-        # Show waiting indicator
         sys.stdout.write(f"\r\033[K{indent}{_C.muted}  [{agent_name}] step {step + 1}/{max_steps}...{_C.reset}")
         sys.stdout.flush()
 
@@ -173,7 +174,6 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
                 temperature=ctx.config.temperature if ctx.config else 0.7,
                 max_tokens=ctx.config.max_tokens if ctx.config else 1024,
             )
-            # Log usage for stats
             _usage = response.get("usage")
             _model = response.get("model_id") or (ctx.llm_client.model if ctx.llm_client else None)
             _log = ctx.session_log
@@ -192,7 +192,8 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         except Exception as e:
             sys.stdout.write(f"\r\033[K")
             sys.stdout.flush()
-            return f"Agent error: {e}"
+            return _format_agent_error(agent_name, step, max_steps, action_log,
+                                       f"LLM error: {e}")
 
         elapsed = time.monotonic() - t0
         sys.stdout.write(f"\r\033[K")
@@ -205,10 +206,11 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         if not tool_calls:
             return response.get("content") or "Agent returned no result"
 
-        # Show tool calls
         for tc in tool_calls:
             tc_name = tc["name"]
             tc_args = tc["args"]
+
+            # Display
             if tc_name == "bash":
                 desc = tc_args.get("description", "")
                 cmd = tc_args.get("command", "")
@@ -227,7 +229,27 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
                 detail = str(tc_args)[:80] if tc_args else ""
                 print(f"{indent}  {_C.tool_call}{tc_name}{_C.reset} {_C.muted}{detail}{_C.reset}")
 
+            # Execute and track
             result = ctx.tool_registry.execute(tc_name, tc_args, sub_ctx)
+
+            # Build action log entry
+            if tc_name == "read":
+                lines_match = __import__("re").search(r"of (\d+)\]", result)
+                n_lines = lines_match.group(1) if lines_match else "?"
+                action_log.append(f"read {tc_args.get('path', '?')} ({n_lines} lines)")
+            elif tc_name == "grep":
+                n_matches = result.count("\n") + 1 if "No matches" not in result else 0
+                action_log.append(f"grep '{tc_args.get('pattern', '')}' ({n_matches} matches)")
+            elif tc_name == "glob":
+                n_files = result.count("\n") + 1 if "No matches" not in result else 0
+                action_log.append(f"glob '{tc_args.get('pattern', '')}' ({n_files} files)")
+            elif tc_name == "bash":
+                action_log.append(f"bash: {tc_args.get('description', tc_args.get('command', ''))[:60]}")
+            else:
+                action_log.append(f"{tc_name}({str(tc_args)[:40]})")
+
+            if result.startswith("Error:"):
+                action_log[-1] += f" FAILED: {result[:80]}"
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
@@ -269,4 +291,14 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
     except Exception as e:
         sys.stdout.write(f"\r\033[K")
         sys.stdout.flush()
-        return f"Agent error: {e}"
+        return _format_agent_error(agent_name, max_steps, max_steps, action_log,
+                                   f"LLM error during summary: {e}")
+
+
+def _format_agent_error(agent_name, step, max_steps, action_log, error_msg):
+    """Format informative error with action history."""
+    parts = [f"Agent '{agent_name}' failed at step {step + 1}/{max_steps}."]
+    if action_log:
+        parts.append(f"Completed actions: {'; '.join(action_log)}.")
+    parts.append(f"Error: {error_msg}")
+    return " ".join(parts)

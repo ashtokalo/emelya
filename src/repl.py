@@ -59,10 +59,14 @@ class _WaitSpinner:
             time.sleep(0.05)
         # Animate
         frame_idx = 0
+        hint_shown = False
         while self._running:
             elapsed = time.monotonic() - self._start_time
             frame = self._FRAMES[frame_idx % len(self._FRAMES)]
-            sys.stdout.write(f"\r\033[K  {C.spinner}{frame}{C.reset} {C.muted}{self._label} [{elapsed:.0f}s]{C.reset}")
+            hint = "  Ctrl+C to cancel" if elapsed > 30 and not hint_shown else ""
+            if elapsed > 30:
+                hint_shown = True
+            sys.stdout.write(f"\r\033[K  {C.spinner}{frame}{C.reset} {C.muted}{self._label} [{elapsed:.0f}s]{hint}{C.reset}")
             sys.stdout.flush()
             frame_idx += 1
             time.sleep(0.1)
@@ -163,12 +167,17 @@ class REPL:
         if not cfg:
             cfg = self._models.get("local", {})
             self.active_model = "local"
-        # Apply model-specific context_limit if set
+        # Apply context_limit: explicit > known provider > CLI default
         model_ctx_limit = cfg.get("context_limit")
-        if model_ctx_limit:
-            self.context.context_limit = model_ctx_limit
-        else:
-            self.context.context_limit = self.config.context_limit
+        if not model_ctx_limit:
+            base_url = cfg.get("base_url", "")
+            for domain, limit in self._KNOWN_LIMITS.items():
+                if domain in base_url:
+                    model_ctx_limit = limit
+                    break
+        self.context.context_limit = model_ctx_limit or self.config.context_limit
+        # Apply max_tokens: per-model > CLI default
+        self.config.max_tokens = cfg.get("max_tokens") or self.config.max_tokens
         return LLMClient(
             base_url=cfg.get("base_url", self.config.base_url),
             model=cfg.get("model", "default"),
@@ -190,9 +199,14 @@ class REPL:
         ok, info = self.llm.check_connection()
         if ok:
             self._update_model_display(info)
-            print(f"  {t('switched_to')}: {self._model_display} ({info})")
+            # Apply detected context limit if no explicit override
+            detected = getattr(self.llm, "detected_context_limit", None)
+            cfg = self._models.get(name, {})
+            if detected and not cfg.get("context_limit"):
+                self.context.context_limit = detected
+            print(f"  {t('switched_to')}: {self._model_display}, ctx:{self.context.context_limit // 1000}K")
         else:
-            print(f"  {t('switched_to')}: {name} (warning: {info})")
+            print(f"  {t('switched_to')}: {name} ({t('warning')}: {info})")
 
     def _update_model_display(self, info: str = ""):
         """Extract short model name from connection info or API response."""
@@ -608,32 +622,20 @@ class REPL:
                 else:
                     consecutive_errors = 0
 
-            # Break if too many consecutive errors (model is stuck)
+            # Break if too many consecutive errors — force answer
             if consecutive_errors >= 3:
-                work_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_calls[-1]["id"] if tool_calls else "",
-                    "content": (
-                        "STOP: 3 consecutive errors. Your arguments are being truncated. "
-                        "Change approach: use smaller edits, split work into multiple steps, "
-                        "or write a helper script via bash."
-                    ),
-                })
-                consecutive_errors = 0
+                break
 
-
-            # Progressive nudges — inserted BEFORE the LLM call, AFTER all tool results
+            # Progressive nudge — only if last message is a tool result (safe position)
             remaining = self.config.max_iterations - iteration - 1
+            nudge = None
             if remaining == 3:
-                work_messages.append({
-                    "role": "user",
-                    "content": "IMPORTANT: Only 3 steps left. Start composing your answer.",
-                })
+                nudge = "IMPORTANT: Only 3 steps left. Start composing your answer."
             elif remaining == 1:
-                work_messages.append({
-                    "role": "user",
-                    "content": "LAST STEP. Give your final answer NOW. Do not call any more tools.",
-                })
+                nudge = "LAST STEP. Give your final answer NOW. Do not call any more tools."
+            # Insert nudge only if safe (last message is tool, not assistant with tool_calls)
+            if nudge and work_messages and work_messages[-1].get("role") == "tool":
+                work_messages.append({"role": "user", "content": nudge})
 
             # Next LLM call in work context (refresh tools — load_tools may have added new ones)
             tools = self.registry.get_tools()
@@ -656,9 +658,10 @@ class REPL:
             tool_calls = response.get("tool_calls")
             if not tool_calls:
                 break  # Final text response
-        else:
-            # Max iterations — force final response without tools
-            print("\n  (max iterations, forcing answer...)")
+
+        # Force answer if loop ended without text response
+        if not final_text:
+            print(f"\n  ({t('max_iter')})")
             work_messages.append({
                 "role": "user",
                 "content": (
@@ -815,7 +818,7 @@ class REPL:
 
     # Known input context limits for auto-detection
     _KNOWN_LIMITS = {
-        "api.deepseek.com": 64000,   # V3: 64K input (1M total with cache)
+        "api.deepseek.com": 128000,  # V3: 64K input, V4: 128K+ (conservative)
         "api.openai.com": 128000,    # GPT-4o: 128K
         "openrouter.ai": 128000,     # varies by model
     }
@@ -1278,7 +1281,13 @@ class REPL:
         ok, info = self.llm.check_connection()
         if ok:
             self._update_model_display(info)
-            print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {t('ready_model', model=self._model_display)}")
+            # Apply detected context limit if no explicit override
+            detected = getattr(self.llm, "detected_context_limit", None)
+            cfg = self._models.get(self.active_model, {})
+            if detected and not cfg.get("context_limit"):
+                self.context.context_limit = detected
+            ctx_info = f", ctx:{self.context.context_limit // 1000}K"
+            print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {t('ready_model', model=self._model_display)}{C.muted}{ctx_info}{C.reset}")
         else:
             print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {C.warning}{info}{C.reset}. {t('use_model_switch')}")
 

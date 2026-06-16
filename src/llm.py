@@ -25,8 +25,11 @@ class LLMClient:
         self.retry_delay = retry_delay
 
     def check_connection(self) -> tuple:
-        """Check server availability. Returns (ok, info_message)."""
-        # Try /v1/models first (returns model list), then /health (llama.cpp)
+        """Check server availability. Returns (ok, info_message).
+        Also sets self.detected_context_limit if discoverable."""
+        self.detected_context_limit = None
+
+        # Try /v1/models (OpenAI-compatible)
         try:
             req = urllib.request.Request(f"{self.base_url}/v1/models")
             if self.api_key:
@@ -37,6 +40,12 @@ class LLMClient:
                     models = data.get("data", [])
                     if models:
                         ids = [m.get("id", "?") for m in models[:5]]
+                        # Some APIs return context_length in model info
+                        for m in models:
+                            ctx = m.get("context_length") or m.get("context_window")
+                            if ctx and isinstance(ctx, int):
+                                self.detected_context_limit = ctx
+                                break
                         return True, f"models: {', '.join(ids)}"
                     return True, "OK"
         except urllib.error.HTTPError as e:
@@ -44,6 +53,19 @@ class LLMClient:
                 return False, "Authentication failed (invalid API key)"
         except Exception:
             pass
+
+        # Try /props (llama.cpp — returns n_ctx)
+        try:
+            req = urllib.request.Request(f"{self.base_url}/props")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    n_ctx = data.get("n_ctx")
+                    if n_ctx and isinstance(n_ctx, int):
+                        self.detected_context_limit = n_ctx
+        except Exception:
+            pass
+
         # Fallback: /health (llama.cpp)
         try:
             req = urllib.request.Request(f"{self.base_url}/health")
@@ -142,7 +164,7 @@ class LLMClient:
         return result
 
     def chat(self, messages: list, tools: list = None,
-             temperature: float = 0.7, max_tokens: int = 1024) -> dict:
+             temperature: float = 0.7, max_tokens: int = 8192) -> dict:
         """Non-streaming chat completion.
 
         Returns dict with:
@@ -236,7 +258,7 @@ class LLMClient:
             pass
 
     def stream_chat(self, messages: list, tools: list = None,
-                    temperature: float = 0.7, max_tokens: int = 1024,
+                    temperature: float = 0.7, max_tokens: int = 8192,
                     on_content=None) -> dict:
         """Streaming chat completion.
 

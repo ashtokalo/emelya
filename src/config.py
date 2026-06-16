@@ -12,7 +12,7 @@ class Config:
     model: str = "default"
     model_name: str = None  # name from models.json, None = "local"
     temperature: float = 0.7
-    max_tokens: int = 1024
+    max_tokens: int = 8192
     context_limit: int = 8000
     work_dir: Path = None
     max_iterations: int = 10
