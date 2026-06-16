@@ -1,5 +1,5 @@
 [project]
-name = "aigent"
+name = "emelya"
 version = "0.1.0"
 description = "CLI AI agent for local and cloud LLMs with tool calling, MCP support, and zero dependencies"
 readme = "README.md"
@@ -9,4 +9,4 @@ authors = [{name = "Alexey Shtokalo"}]
 keywords = ["ai", "agent", "cli", "llm", "llama.cpp", "tool-calling", "mcp"]
 
 [project.scripts]
-aigent = "src.__main__:main"
+emelya = "src.__main__:main"

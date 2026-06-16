@@ -1,4 +1,4 @@
-# Архитектура Aigent
+# Архитектура Emelya
 
 ## Цель
 
@@ -91,7 +91,7 @@ User input
 
 - **CLI**: `--use NAME` — запуск с конкретной моделью
 - **Команда**: `/model [NAME]` — переключение в рантайме (без аргументов — список моделей)
-- **Промпт**: отображает активную модель: `Aigent(local, 350 tok):` или `Aigent(deepseek, 350 tok):`
+- **Промпт**: отображает активную модель: `Emelya(local, 350 tok):` или `Emelya(deepseek, 350 tok):`
 
 ### Edit tool limit
 
@@ -108,7 +108,7 @@ User input
 ## Структура файлов
 
 ```
-aigent/
+emelya/
 ├── models.json                    — конфигурация моделей (multi-model)
 ├── src/                           — 4100 строк Python
 │   ├── __main__.py                — точка входа
@@ -155,7 +155,7 @@ aigent/
 │
 ├── docs/                          — документация
 │
-└── .aigent/                       — данные проекта (создаётся при запуске)
+└── .emelya/                       — данные проекта (создаётся при запуске)
     ├── sessions/{name}/           — сохранённые сессии
     │   ├── context.json           — контекст диалога
     │   └── log.txt                — детальный лог
@@ -202,7 +202,7 @@ Work context: автоматически обрезается при дости�
 ## Сессии
 
 ```
-/save myproject     → .aigent/sessions/myproject/context.json + log.txt
+/save myproject     → .emelya/sessions/myproject/context.json + log.txt
 /load myproject     → восстанавливает контекст
 /new [name]         → сохраняет текущую + начинает новую
 ```
@@ -215,9 +215,9 @@ Work context: автоматически обрезается при дости�
 
 ### Жизненный цикл
 
-1. **Конфиг** → `.aigent/mcp.json` (добавляется через `/mcp add`)
-2. **Запуск** → при старте aigent читает конфиг, но НЕ подключается
-3. **Кеш** → tool descriptions загружаются из `.aigent/mcp_cache/` (если есть)
+1. **Конфиг** → `.emelya/mcp.json` (добавляется через `/mcp add`)
+2. **Запуск** → при старте emelya читает конфиг, но НЕ подключается
+3. **Кеш** → tool descriptions загружаются из `.emelya/mcp_cache/` (если есть)
 4. **Регистрация** → MCP tools регистрируются как extension category `mcp:{name}`
 5. **Lazy connect** → подключение к серверу происходит при первом вызове tool
 6. **Refresh** → `/mcp refresh` переподключается и обновляет кеш

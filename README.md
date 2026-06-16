@@ -1,4 +1,4 @@
-# Aigent — CLI AI Agent for Local and Cloud LLMs
+# Emelya — CLI AI Agent for Local and Cloud LLMs
 
 Interactive command-line AI agent that works with local and cloud models via OpenAI-compatible API.
 Designed for programming, file analysis, debugging, and general-purpose tasks.
@@ -55,7 +55,7 @@ Configure models in `models.json`:
 
 Switch models at runtime with `/model` command or at startup with `--use NAME`.
 
-The prompt displays the active model name: `Aigent(local, 350 tok):` or `Aigent(deepseek, 350 tok):`.
+The prompt displays the active model name: `Emelya(local, 350 tok):` or `Emelya(deepseek, 350 tok):`.
 
 ### GigaChat, YandexGPT and other non-OpenAI providers
 
@@ -71,7 +71,7 @@ GIGACHAT_API_KEY=... litellm --model gigachat/GigaChat-Pro --port 4000
 YANDEX_API_KEY=... litellm --model yandex/yandexgpt --port 4000
 ```
 
-Then in aigent:
+Then in emelya:
 ```
 /model add gigachat http://localhost:4000 GigaChat-Pro
 /model add yandex http://localhost:4000 yandexgpt
@@ -204,7 +204,7 @@ prompts/system.md             — system prompt template
 skills/*.md                   — 15 skill files
 agents/*.md                   — 14 agent templates
 docs/                         — architecture documentation
-.aigent/                      — per-project data (created at runtime)
+.emelya/                      — per-project data (created at runtime)
 ├── sessions/                 — saved sessions (context.json + log.txt)
 ├── mcp.json                  — MCP server configuration
 └── mcp_cache/                — cached MCP tool descriptions
@@ -230,7 +230,7 @@ Extension tools:        ~200-300 tokens (only when loaded)
 
 ## Project Configuration
 
-Place `aigent.md` in the working directory for project-specific instructions:
+Place `emelya.md` in the working directory for project-specific instructions:
 
 ```markdown
 Use виртуальное окружение .venv.
@@ -238,7 +238,7 @@ Use виртуальное окружение .venv.
 Линтинг — ruff check.
 ```
 
-This file is NOT about aigent itself — it's instructions for the AI when working in YOUR project.
+This file is NOT about emelya itself — it's instructions for the AI when working in YOUR project.
 
 ## Requirements
 

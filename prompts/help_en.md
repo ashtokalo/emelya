@@ -1,0 +1,40 @@
+  Emelya — CLI AI Agent
+
+  Just type a task or question. Emelya uses tools to work with files,
+  code, archives, documents, and external services.
+
+  Use @path/to/file to reference a file (Tab for completion).
+  Multi-line paste from clipboard collapses into a placeholder.
+
+  Commands:
+
+  /help                  — this help
+  /clear                 — clear conversation context
+  /compact               — compress context (model summarizes history)
+  /undo                  — undo last file change
+  /drop N                — remove message N from context (/history for numbers)
+
+  /save [name]           — save session
+  /load [name]           — load session (no args = list sessions)
+  /new [name]            — start new session
+
+  /model                 — list models
+  /model name            — switch model
+  /model add name url model [key]  — add model
+
+  /tools                 — show loaded tools
+  /mcp                   — MCP server status
+  /mcp add name command  — connect MCP server
+
+  /stats                 — token stats (session + project)
+  /context               — current context size
+  /history               — full context dump
+  /exit                  — exit
+
+  Tips:
+
+  - The model picks tools and agents automatically
+  - For long tasks the model may call agents (subprocesses with isolated context)
+  - Project config: emelya.md (repo) and .emelya/config.md (personal)
+  - MCP servers connect lazily — on first tool call
+  - /compact helps when context grows and model slows down

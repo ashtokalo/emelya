@@ -148,6 +148,87 @@ class SessionLog:
         self._file.close()
 
 
+class UsageTracker:
+    """Append-only project-wide usage log at .emelya/usage.jsonl.
+
+    Each line: {"ts": "...", "model": "...", "prompt": N, "completion": N, "total": N, "session": "..."}
+    Survives session deletion.
+    """
+
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
+        self._file = open(path, "a", encoding="utf-8")
+
+    def record(self, model: str, prompt: int, completion: int, total: int,
+               session: str = ""):
+        entry = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model": model,
+            "prompt": prompt,
+            "completion": completion,
+            "total": total,
+        }
+        if session:
+            entry["session"] = session
+        self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self._file.flush()
+
+    def close(self):
+        self._file.close()
+
+    @staticmethod
+    def load_stats(path: Path) -> dict:
+        """Load and aggregate usage from .emelya/usage.jsonl.
+
+        Returns {by_model, by_date, totals}.
+        """
+        by_model = {}
+        by_date = {}
+        totals = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
+
+        if not path.exists():
+            return {"by_model": by_model, "by_date": by_date, "totals": totals}
+
+        def _add(d, key, p, c, t):
+            if key not in d:
+                d[key] = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
+            d[key]["prompt"] += p
+            d[key]["completion"] += c
+            d[key]["total"] += t
+            d[key]["requests"] += 1
+
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    u = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                prompt = u.get("prompt", 0)
+                completion = u.get("completion", 0)
+                total = u.get("total", 0) or (prompt + completion)
+                model = u.get("model", "unknown")
+                date = u.get("ts", "")[:10] or "unknown"
+
+                _add(by_model, model, prompt, completion, total)
+                _add(by_date, date, prompt, completion, total)
+                totals["prompt"] += prompt
+                totals["completion"] += completion
+                totals["total"] += total
+                totals["requests"] += 1
+        except OSError:
+            pass
+
+        return {
+            "by_model": by_model,
+            "by_date": dict(sorted(by_date.items())),
+            "totals": totals,
+        }
+
+
 def collect_stats(sessions_dir: Path) -> dict:
     """Parse all log files in sessions dir, aggregate token usage.
 

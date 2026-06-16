@@ -200,7 +200,7 @@ class LLMClient:
         """Dump failed request to /tmp for debugging."""
         import os
         from pathlib import Path
-        dump_dir = Path("/tmp/aigent_debug")
+        dump_dir = Path("/tmp/emelya_debug")
         dump_dir.mkdir(exist_ok=True)
         ts = time.strftime("%H%M%S")
         dump_path = dump_dir / f"request_{ts}.json"

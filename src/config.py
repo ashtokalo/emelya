@@ -25,19 +25,19 @@ class Config:
 
     @property
     def config_file(self) -> Path:
-        return self.work_dir / "aigent.md"
+        return self.work_dir / "emelya.md"
 
 
 def parse_args(argv=None) -> Config:
     parser = argparse.ArgumentParser(
-        description="Aigent — CLI AI Agent for local LLMs"
+        description="Emelya — CLI AI Agent for local LLMs"
     )
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--model", default="default",
                         help="Model name on the server (default: default)")
     parser.add_argument("--use", default=None, metavar="NAME",
-                        help="Use a named model from .aigent/models.json")
+                        help="Use a named model from .emelya/models.json")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--context-limit", type=int, default=8000)

@@ -174,12 +174,20 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
                 max_tokens=ctx.config.max_tokens if ctx.config else 1024,
             )
             # Log usage for stats
+            _usage = response.get("usage")
+            _model = response.get("model_id") or (ctx.llm_client.model if ctx.llm_client else None)
             _log = ctx.session_log
             if _log:
                 _log.response(
                     response.get("content"), response.get("tool_calls"),
-                    usage=response.get("usage"),
-                    model=response.get("model_id") or (ctx.llm_client.model if ctx.llm_client else None),
+                    usage=_usage, model=_model,
+                )
+            if _usage and ctx.usage_tracker:
+                ctx.usage_tracker.record(
+                    model=_model or "unknown",
+                    prompt=_usage.get("prompt_tokens", 0),
+                    completion=_usage.get("completion_tokens", 0),
+                    total=_usage.get("total_tokens", 0),
                 )
         except Exception as e:
             sys.stdout.write(f"\r\033[K")
@@ -240,12 +248,20 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
             temperature=ctx.config.temperature if ctx.config else 0.7,
             max_tokens=ctx.config.max_tokens if ctx.config else 1024,
         )
+        _usage = response.get("usage")
+        _model = response.get("model_id") or (ctx.llm_client.model if ctx.llm_client else None)
         _log = ctx.session_log
         if _log:
             _log.response(
                 response.get("content"), None,
-                usage=response.get("usage"),
-                model=response.get("model_id") or (ctx.llm_client.model if ctx.llm_client else None),
+                usage=_usage, model=_model,
+            )
+        if _usage and ctx.usage_tracker:
+            ctx.usage_tracker.record(
+                model=_model or "unknown",
+                prompt=_usage.get("prompt_tokens", 0),
+                completion=_usage.get("completion_tokens", 0),
+                total=_usage.get("total_tokens", 0),
             )
         sys.stdout.write(f"\r\033[K")
         sys.stdout.flush()

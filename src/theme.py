@@ -26,7 +26,7 @@ class _Theme:
     user_text = "\033[0m"          # default — user's message
 
     # Agent response
-    agent_prefix = "\033[1;36m"    # bold cyan — "Aigent (model, tok, time):"
+    agent_prefix = "\033[1;36m"    # bold cyan — "Emelya (model, tok, time):"
     agent_text = "\033[0m"         # default — response text
 
     # Tool calls (intermediate operations)

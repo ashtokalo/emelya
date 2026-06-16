@@ -1,5 +1,5 @@
 # Runtime data
-.aigent/
+.emelya/
 logs/
 __pycache__/
 *.pyc
@@ -10,7 +10,7 @@ __pycache__/
 .env
 
 # Debug artifacts
-/tmp/aigent_debug/
+/tmp/emelya_debug/
 log_*.txt
 log-*.txt
 context_*.json

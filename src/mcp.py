@@ -66,7 +66,7 @@ class MCPClient:
         result = self._request("initialize", {
             "protocolVersion": self.PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": {"name": "aigent", "version": "1.0"},
+            "clientInfo": {"name": "emelya", "version": "1.0"},
         })
         self.server_info = result.get("serverInfo", {})
         server_name = self.server_info.get("name", "?")
@@ -283,7 +283,7 @@ def compact_tool_description(tool: dict) -> dict:
 
 
 def load_mcp_config(config_path: Path) -> dict:
-    """Load MCP server configuration from .aigent/mcp.json.
+    """Load MCP server configuration from .emelya/mcp.json.
 
     Format:
     {

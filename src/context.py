@@ -60,6 +60,7 @@ class Context:
 
     def clear(self):
         """Clear all messages (keep system prompt)."""
+        self.last_usage = None
         self.messages.clear()
 
     def update_usage(self, usage: dict):
@@ -109,6 +110,7 @@ class Context:
 
     def apply_compact(self, summary: str):
         """Replace all messages with a compact summary."""
+        self.last_usage = None  # reset so estimate_tokens uses heuristic
         self.messages.clear()
         self.messages.append({
             "role": "user",

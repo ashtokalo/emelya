@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aigent — CLI AI Agent for local LLMs."""
+"""Emelya — CLI AI Agent for local LLMs."""
 
 import sys
 from pathlib import Path

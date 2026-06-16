@@ -25,6 +25,7 @@ class ToolContext:
     agents_dir: Path = None
     llm_client: object = None
     session_log: object = None  # SessionLog for usage tracking
+    usage_tracker: object = None  # UsageTracker for project-wide stats
     tool_registry: object = None
     config: object = None
 

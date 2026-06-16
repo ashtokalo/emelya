@@ -45,7 +45,7 @@ class Sandbox:
         """If file not found, try to suggest a similar existing path."""
         from pathlib import PurePosixPath
         parts = PurePosixPath(path).parts
-        # Try removing each directory level: src/aigent/repl.py → src/repl.py
+        # Try removing each directory level: src/emelya/repl.py → src/repl.py
         for i in range(len(parts) - 1):
             for skip in range(len(parts) - 1):
                 candidate_parts = parts[:skip] + parts[skip + 1:]

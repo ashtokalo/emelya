@@ -29,7 +29,7 @@ DEFINITION = {
 
 MAX_RESPONSE_BYTES = 512 * 1024  # 512KB download limit
 DEFAULT_MAX_LENGTH = 5000
-USER_AGENT = "Aigent/1.0 (CLI AI Assistant)"
+USER_AGENT = "Emelya/1.0 (CLI AI Assistant)"
 
 # Tags whose content should be skipped entirely
 SKIP_TAGS = {"script", "style", "noscript", "svg", "head"}

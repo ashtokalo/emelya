@@ -26,6 +26,6 @@ All notable changes to this project will be documented in this file.
 - **Progressive nudges** — warns model when iterations are running out
 - **SSL error recovery** — graceful handling of stream interruptions
 - **JSON repair** — handles truncated tool call arguments from cloud models
-- **Project config** — `aigent.md` (repo) + `.aigent/config.md` (local)
+- **Project config** — `emelya.md` (repo) + `.emelya/config.md` (local)
 - **45 unit tests** for core modules (context, sandbox, tools)
 - MIT License

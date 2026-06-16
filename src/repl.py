@@ -9,12 +9,13 @@ from datetime import datetime
 from pathlib import Path
 
 from config import Config
+from i18n import t
 from theme import C
 from context import Context
 from input_history import InputHistory
 from line_editor import LineEditor, strip_markers
 from llm import LLMClient, LLMError
-from log import SessionLog, collect_stats
+from log import SessionLog, UsageTracker, collect_stats
 from mcp import MCPClient, MCPError, compact_tool_description, load_mcp_config, load_cache, save_cache
 from sandbox import Sandbox
 from tools import ToolContext, ToolRegistry
@@ -77,13 +78,13 @@ class REPL:
         self.registry = ToolRegistry()
 
         src_dir = Path(__file__).parent
-        self.app_dir = src_dir.parent  # aigent/ root
+        self.app_dir = src_dir.parent  # emelya/ root
         self.skills_dir = self.app_dir / "skills"
         self.agents_dir = self.app_dir / "agents"
-        self.sessions_dir = config.work_dir / ".aigent" / "sessions"
+        self.sessions_dir = config.work_dir / ".emelya" / "sessions"
 
         # Models management
-        self._models_path = config.work_dir / ".aigent" / "models.json"
+        self._models_path = config.work_dir / ".emelya" / "models.json"
         self._models = self._load_models()
         self.active_model = config.model_name or "local"
         self._model_display = self.active_model  # updated from API response
@@ -92,6 +93,7 @@ class REPL:
         # Session management
         self.session_name = datetime.now().strftime("tmp%Y%m%d%H%M%S")
         self.log = self._create_log()
+        self.usage_tracker = UsageTracker(config.work_dir / ".emelya" / "usage.jsonl")
 
         # Tool context shared across calls
         self.tool_ctx = ToolContext(
@@ -103,6 +105,7 @@ class REPL:
             llm_client=self.llm,
             config=config,
             session_log=self.log,
+            usage_tracker=self.usage_tracker,
         )
 
         # Load tools
@@ -111,6 +114,7 @@ class REPL:
 
         # Load MCP servers (register as extension categories)
         self._mcp_clients = {}
+        self._mcp_startup_info = []  # collected during init, printed after banner
         self._init_mcp()
 
         # Update skill/agent tool descriptions with available items
@@ -129,7 +133,7 @@ class REPL:
     # --- Model management ---
 
     def _load_models(self) -> dict:
-        """Load models from .aigent/models.json. Always includes 'local' from CLI args."""
+        """Load models from .emelya/models.json. Always includes 'local' from CLI args."""
         models = {
             "local": {
                 "base_url": self.config.base_url,
@@ -174,7 +178,7 @@ class REPL:
     def _switch_model(self, name: str):
         """Switch to a different model."""
         if name not in self._models:
-            print(f"  Unknown model: {name}")
+            print(f"  {t('unknown_model')}: {name}")
             self._list_models()
             return
         prev = self.active_model
@@ -186,9 +190,9 @@ class REPL:
         ok, info = self.llm.check_connection()
         if ok:
             self._update_model_display(info)
-            print(f"  Switched to: {self._model_display} ({info})")
+            print(f"  {t('switched_to')}: {self._model_display} ({info})")
         else:
-            print(f"  Switched to: {name} (warning: {info})")
+            print(f"  {t('switched_to')}: {name} (warning: {info})")
 
     def _update_model_display(self, info: str = ""):
         """Extract short model name from connection info or API response."""
@@ -216,9 +220,9 @@ class REPL:
 
         Servers connect lazily when load_tools("mcp:name") is called.
         """
-        aigent_dir = self.config.work_dir / ".aigent"
-        config_path = aigent_dir / "mcp.json"
-        cache_dir = aigent_dir / "mcp_cache"
+        app_data_dir = self.config.work_dir / ".emelya"
+        config_path = app_data_dir / "mcp.json"
+        cache_dir = app_data_dir / "mcp_cache"
 
         self._mcp_config = load_mcp_config(config_path)
         if not self._mcp_config:
@@ -229,10 +233,14 @@ class REPL:
             if cached:
                 # Register from cache with a lazy executor
                 self._register_mcp_lazy(name, cached)
-                print(f"  MCP: {name} ({len(cached)} tools, cached)")
+                self._mcp_startup_info.append((name, len(cached), True))
             else:
-                # No cache — need to connect now to discover tools
-                self._mcp_connect(name, cfg)
+                try:
+                    self._mcp_connect(name, cfg)
+                    n = len(self._mcp_clients[name].tools)
+                    self._mcp_startup_info.append((name, n, False))
+                except MCPError as e:
+                    self._mcp_startup_info.append((name, 0, False, str(e)))
 
     def _register_mcp_lazy(self, server_name: str, cached_tools: list):
         """Register MCP tools with lazy connection — connects on first call."""
@@ -264,7 +272,7 @@ class REPL:
                             return f"Error: MCP server '{srv_name}' not configured"
                         print(f"\n  Connecting to MCP {srv_name}...", flush=True)
                         try:
-                            self._mcp_connect(srv_name, cfg)
+                            self._mcp_connect(srv_name, cfg, verbose=True)
                         except MCPError as e:
                             return f"Error connecting to {srv_name}: {e}"
                     client = self._mcp_clients.get(srv_name)
@@ -282,12 +290,12 @@ class REPL:
                 "description": tool.get("description", tool_name),
             }
 
-    def _mcp_connect(self, name: str, cfg: dict):
+    def _mcp_connect(self, name: str, cfg: dict, verbose: bool = False):
         """Connect to an MCP server and register its tools."""
         command = cfg.get("command", "")
         if not command:
             return
-        status_cb = lambda msg: print(f"  MCP {name}: {msg}", flush=True)
+        status_cb = (lambda msg: print(f"  MCP {name}: {msg}", flush=True)) if verbose else None
         client = MCPClient(
             name=name, command=command,
             args=cfg.get("args", []),
@@ -298,7 +306,7 @@ class REPL:
         self._mcp_clients[name] = client
 
         # Cache tools
-        cache_dir = self.config.work_dir / ".aigent" / "mcp_cache"
+        cache_dir = self.config.work_dir / ".emelya" / "mcp_cache"
         cached = [compact_tool_description(t) for t in client.tools]
         save_cache(cache_dir, name, cached)
 
@@ -367,7 +375,7 @@ class REPL:
             "os": platform.platform(),
         })
 
-        # Append project config if exists (aigent.md)
+        # Append project config if exists (emelya.md)
         if self.config.config_file.exists():
             try:
                 custom = self.config.config_file.read_text(encoding="utf-8").strip()
@@ -376,8 +384,8 @@ class REPL:
             except Exception:
                 pass
 
-        # Append local config if exists (.aigent/config.md — personal, not in repo)
-        local_config = self.config.work_dir / ".aigent" / "config.md"
+        # Append local config if exists (.emelya/config.md — personal, not in repo)
+        local_config = self.config.work_dir / ".emelya" / "config.md"
         if local_config.exists():
             try:
                 local = local_config.read_text(encoding="utf-8").strip()
@@ -395,8 +403,8 @@ class REPL:
         if self.config.confirm_mode == "no_confirm":
             return True
         try:
-            answer = input(f"  {C.warning}Allow? (y/n):{C.reset} ").strip().lower()
-            return answer in ("y", "yes")
+            answer = input(f"  {C.warning}{t('allow')}:{C.reset} ").strip().lower()
+            return answer in ("y", "yes", "д", "да")
         except (EOFError, KeyboardInterrupt):
             return False
 
@@ -430,14 +438,29 @@ class REPL:
             print(f"\n  {C.tool_call}{name}:{C.reset} {json.dumps(args, ensure_ascii=False)}")
 
     def _print_tool_result(self, name: str, result: str):
-        """Display tool result (abbreviated)."""
+        """Display tool result (abbreviated). Limits both lines and chars."""
         is_error = result.startswith("Error:")
         color = C.tool_error if is_error else C.tool_result
+        max_chars = 500
+        max_lines = 10
         lines = result.split("\n")
-        show = lines[:10] if len(lines) > 15 else lines
+        truncated = False
+
+        # Check total length — for long single-line results (JSON from MCP)
+        if len(result) > max_chars and len(lines) <= 2:
+            preview = result[:max_chars]
+            print(f"  {color}{preview}{C.reset}")
+            print(f"  {C.muted}... ({len(result)} chars total){C.reset}")
+            return
+
+        if len(lines) > max_lines:
+            show = lines[:max_lines]
+            truncated = True
+        else:
+            show = lines
         for line in show:
             print(f"  {color}{line}{C.reset}")
-        if len(lines) > 15:
+        if truncated:
             print(f"  {C.muted}... ({len(lines)} lines total){C.reset}")
 
     def _llm_call(self, messages, tools):
@@ -446,8 +469,9 @@ class REPL:
         self.log.request(url, messages, tools)
 
         tokens = self.context.estimate_tokens()
-        label = f"Aigent ({self._model_display}, {tokens} tok)"
-        colored_prefix_tpl = f"\n{C.agent_prefix}Aigent{C.reset} ({C.muted}{self._model_display}, {{tok}} tok, {{elapsed:.1f}}s{C.reset}): "
+        _name = t('emelya')
+        label = f"{_name} ({self._model_display}, {tokens} tok)"
+        colored_prefix_tpl = f"\n{C.agent_prefix}{_name}{C.reset} ({C.muted}{self._model_display}, {{tok}} tok, {{elapsed:.1f}}s{C.reset}): "
 
         spinner = _WaitSpinner(label)
         spinner.start()
@@ -503,10 +527,21 @@ class REPL:
                     display = display[:-len(suffix)]
             self._model_display = display
 
+        model_name = mid or self._model_display
+        usage = response.get("usage")
         self.log.response(
             response.get("content"), response.get("tool_calls"),
-            usage=response.get("usage"), model=mid or self._model_display,
+            usage=usage, model=model_name,
         )
+        # Write to project-wide usage tracker
+        if usage:
+            self.usage_tracker.record(
+                model=model_name,
+                prompt=usage.get("prompt_tokens", 0),
+                completion=usage.get("completion_tokens", 0),
+                total=usage.get("total_tokens", 0),
+                session=self.session_name,
+            )
         return response
 
     def _agent_loop(self, user_input: str):
@@ -528,7 +563,7 @@ class REPL:
             # No response received — remove orphaned user message
             self.context.pop_last_user()
             if isinstance(e, KeyboardInterrupt):
-                print("\n  (interrupted)")
+                print(f"\n  {t('interrupted')}")
                 self.log.event("Interrupted by user")
             else:
                 print(f"\nError: {e}")
@@ -610,7 +645,7 @@ class REPL:
                 final_text = final_text or f"(Error during processing: {e})"
                 break
             except KeyboardInterrupt:
-                print("\n  (interrupted)")
+                print(f"\n  {t('interrupted')}")
                 self.log.event("Interrupted by user")
                 break
 
@@ -641,7 +676,7 @@ class REPL:
                 if response.get("content"):
                     final_text = response["content"]
                     tokens = self.context.estimate_tokens()
-                    print(f"\n{C.agent_prefix}Aigent{C.reset} ({C.muted}{self._model_display}, {tokens} tok{C.reset}): {final_text}")
+                    print(f"\n{C.agent_prefix}{t('emelya')}{C.reset} ({C.muted}{self._model_display}, {tokens} tok{C.reset}): {final_text}")
             except Exception as e:
                 print(f"\nError: {e}")
 
@@ -661,12 +696,16 @@ class REPL:
 
     def _handle_command(self, command: str) -> bool:
         """Handle /commands. Returns True if handled."""
+        if command == "/help":
+            self._print_help()
+            return True
+
         if command == "/clear":
             self.context.clear()
             self.tool_ctx.files_read.clear()
             self.tool_ctx.loaded_skills.clear()
             tokens = self.context.estimate_tokens()
-            print(f"  Context cleared [{tokens} tokens]")
+            print(f"  {t('context_cleared')} [{tokens} tokens]")
             return True
 
         if command == "/undo":
@@ -676,7 +715,7 @@ class REPL:
 
         if command == "/compact":
             tokens_before = self.context.estimate_tokens()
-            print("  Compacting context...")
+            print(f"  {t('compacting')}")
             try:
                 msgs = self.context.compact_prompt()
                 response = self.llm.chat(
@@ -697,10 +736,10 @@ class REPL:
             return True
 
         if command == "/tools":
-            print(f"  Loaded tools: {', '.join(self.registry.names)}")
+            print(f"  {t('loaded_tools')}: {', '.join(self.registry.names)}")
             extensions = self.registry.get_extension_summary()
             if extensions:
-                print(f"  Extensions (via load_tools):")
+                print(f"  {t('extensions')} (via load_tools):")
                 for cat, tools in extensions.items():
                     loaded = " [loaded]" if cat in self.registry._loaded else ""
                     print(f"    {cat}: {', '.join(tools.keys())}{loaded}")
@@ -771,7 +810,7 @@ class REPL:
             # Direct switch: /model gpt4
             self._switch_model(subcmd)
         else:
-            print(f"  Unknown model or command: {subcmd}")
+            print(f"  {t('unknown_model')}: {subcmd}")
             print("  Usage: /model, /model <name>, /model add <name> <url> <model> [api_key], /model remove <name>")
 
     # Known input context limits for auto-detection
@@ -850,7 +889,7 @@ class REPL:
             print("  Cannot remove 'local' model")
             return
         if name not in self._models:
-            print(f"  Unknown model: {name}")
+            print(f"  {t('unknown_model')}: {name}")
             return
         if name == self.active_model:
             self._switch_model("local")
@@ -883,7 +922,7 @@ class REPL:
         else:
             self.log.event(f"Session saved: {self.session_name}")
 
-        print(f"  Session saved: {self.session_name}")
+        print(f"  {t('session_saved')}: {self.session_name}")
         print(f"  {session_dir}")
 
     def _cmd_load(self, name: str = ""):
@@ -891,13 +930,13 @@ class REPL:
         if not name:
             # List available sessions
             if not self.sessions_dir.is_dir():
-                print("  No saved sessions")
+                print(f"  {t('no_sessions')}")
                 return
             sessions = sorted(d.name for d in self.sessions_dir.iterdir() if d.is_dir())
             if not sessions:
-                print("  No saved sessions")
+                print(f"  {t('no_sessions')}")
                 return
-            print("  Available sessions:")
+            print(f"  {t('available_sessions')}:")
             for s in sessions:
                 ctx_file = self.sessions_dir / s / "context.json"
                 marker = " *" if s == self.session_name else ""
@@ -910,7 +949,7 @@ class REPL:
 
         ctx_path = self.sessions_dir / name / "context.json"
         if not ctx_path.exists():
-            print(f"  Session not found: {name}")
+            print(f"  {t('session_not_found')}: {name}")
             return
 
         # Close current log, switch session
@@ -927,7 +966,7 @@ class REPL:
 
         tokens = self.context.estimate_tokens()
         n_msgs = len(self.context.messages)
-        print(f"  Session loaded: {name} ({n_msgs} messages, {tokens} tokens)")
+        print(f"  {t('session_loaded')}: {name} ({n_msgs} messages, {tokens} tokens)")
 
     def _cmd_new(self, name: str = ""):
         """Start a new session."""
@@ -951,7 +990,7 @@ class REPL:
         self.input_history = InputHistory(str(self._session_dir() / "history"))
 
         tokens = self.context.estimate_tokens()
-        print(f"  New session: {self.session_name} [{tokens} tokens]")
+        print(f"  {t('new_session')}: {self.session_name} [{tokens} tokens]")
 
     def _cmd_mcp(self, arg: str = ""):
         """Handle /mcp subcommands: (status), add, remove, restart."""
@@ -968,17 +1007,17 @@ class REPL:
         elif subcmd == "":
             self._mcp_status()
         else:
-            print(f"  Unknown: /mcp {subcmd}")
+            print(f"  {t('unknown_subcmd')}: /mcp {subcmd}")
             print("  Usage: /mcp, /mcp add, /mcp remove <name>, /mcp refresh [name]")
 
     def _mcp_status(self):
-        config_path = self.config.work_dir / ".aigent" / "mcp.json"
+        config_path = self.config.work_dir / ".emelya" / "mcp.json"
         mcp_config = getattr(self, "_mcp_config", {})
 
         if not mcp_config and not self._mcp_clients:
-            print("  No MCP servers configured")
-            print(f"  Config: {config_path}")
-            print("  Add: /mcp add <name> <command> [args...]")
+            print(f"  {t('no_mcp')}")
+            print(f"  {t('config')}: {config_path}")
+            print(f"  {t('add_hint')}: /mcp add <name> <command> [args...]")
             return
 
         # Show all configured servers (connected or cached)
@@ -1000,7 +1039,7 @@ class REPL:
             loaded = " [loaded]" if category in self.registry._loaded else ""
             print(f"  {name}: {status}, {n_ext} tools{extra}{loaded}")
 
-        print(f"  Config: {config_path}")
+        print(f"  {t('config')}: {config_path}")
 
     def _mcp_add(self, arg: str):
         if not arg:
@@ -1041,14 +1080,14 @@ class REPL:
         args = filtered[2:] if len(filtered) > 2 else []
 
         # Save to config
-        aigent_dir = self.config.work_dir / ".aigent"
-        config_path = aigent_dir / "mcp.json"
+        app_data_dir = self.config.work_dir / ".emelya"
+        config_path = app_data_dir / "mcp.json"
         config = load_mcp_config(config_path)
         entry = {"command": command, "args": args}
         if env:
             entry["env"] = env
         config[name] = entry
-        aigent_dir.mkdir(parents=True, exist_ok=True)
+        app_data_dir.mkdir(parents=True, exist_ok=True)
         import json as _json
         config_path.write_text(
             _json.dumps({"servers": config}, indent=2, ensure_ascii=False),
@@ -1056,7 +1095,7 @@ class REPL:
         )
 
         # Connect with progress
-        cache_dir = aigent_dir / "mcp_cache"
+        cache_dir = app_data_dir / "mcp_cache"
         status_cb = lambda msg: print(f"  [{name}] {msg}", flush=True)
         try:
             client = MCPClient(name=name, command=command, args=args,
@@ -1087,7 +1126,7 @@ class REPL:
             del self._mcp_clients[name]
 
         # Remove from config
-        config_path = self.config.work_dir / ".aigent" / "mcp.json"
+        config_path = self.config.work_dir / ".emelya" / "mcp.json"
         config = load_mcp_config(config_path)
         if name in config:
             del config[name]
@@ -1098,7 +1137,7 @@ class REPL:
             )
 
         # Remove cache
-        cache_file = self.config.work_dir / ".aigent" / "mcp_cache" / f"{name}.json"
+        cache_file = self.config.work_dir / ".emelya" / "mcp_cache" / f"{name}.json"
         if cache_file.exists():
             cache_file.unlink()
 
@@ -1106,10 +1145,10 @@ class REPL:
 
     def _mcp_restart(self, name: str = ""):
         """Refresh MCP server(s): reconnect and update cache."""
-        config = load_mcp_config(self.config.work_dir / ".aigent" / "mcp.json")
+        config = load_mcp_config(self.config.work_dir / ".emelya" / "mcp.json")
         names = [name] if name else list(config.keys())
         if not names:
-            print("  No MCP servers configured")
+            print(f"  {t('no_mcp')}")
             return
 
         for n in names:
@@ -1124,7 +1163,7 @@ class REPL:
                 continue
 
             try:
-                self._mcp_connect(n, cfg)
+                self._mcp_connect(n, cfg, verbose=True)
                 self._update_dynamic_descriptions()
                 n_tools = len(self._mcp_clients[n].tools)
                 print(f"  {n}: refreshed ({n_tools} tools, cache updated)")
@@ -1132,6 +1171,15 @@ class REPL:
                 print(f"  {n}: failed — {e}")
 
         self._update_dynamic_descriptions()
+
+    def _print_help(self):
+        """Print help from prompts/help.md."""
+        help_path = self.app_dir / "prompts" / t("help_file")
+        try:
+            text = help_path.read_text(encoding="utf-8").strip()
+            print(f"\n{text}")
+        except FileNotFoundError:
+            print("  Help file not found: prompts/help.md")
 
     def _print_stats(self):
         """Show token usage stats: current session + project total."""
@@ -1150,33 +1198,35 @@ class REPL:
                 return
             print(f"\n  === {title} ===\n")
             if by_model:
-                print("  By model:")
+                print(f"  {t('by_model')}:")
                 for model, m in sorted(by_model.items()):
                     print(f"    {model}: {fmt(m['total'])} tokens"
                           f" ({fmt(m['prompt'])} in + {fmt(m['completion'])} out)"
                           f" / {m['requests']} req")
             if by_date:
-                print(f"\n  By date:")
+                print(f"\n  {t('by_date')}:")
                 for date, d in sorted(by_date.items()):
                     print(f"    {date}: {fmt(d['total'])} tokens / {d['requests']} req")
-            print(f"\n  Total: {fmt(totals['total'])} tokens / {totals['requests']} req")
+            print(f"\n  {t('total')}: {fmt(totals['total'])} tokens / {totals['requests']} req")
 
-        # Current session
+        # Current session (from session logs)
         cur = stats.get("by_session", {}).get(self.session_name)
         if cur:
             print_section(
-                f"Session: {self.session_name}",
+                f"{t('session')}: {self.session_name}",
                 cur.get("by_model", {}),
                 cur.get("by_date", {}),
                 cur,
             )
 
-        # Project total
+        # Project total (from persistent usage.jsonl — survives session deletion)
+        usage_path = self.config.work_dir / ".emelya" / "usage.jsonl"
+        project_stats = UsageTracker.load_stats(usage_path)
         print_section(
-            "Project total",
-            stats.get("by_model", {}),
-            stats.get("by_date", {}),
-            stats.get("totals", {"requests": 0}),
+            t("project_total"),
+            project_stats.get("by_model", {}),
+            project_stats.get("by_date", {}),
+            project_stats.get("totals", {"requests": 0}),
         )
 
     def _print_full_context(self):
@@ -1205,27 +1255,47 @@ class REPL:
                 preview = content[:500] + "..." if len(content) > 500 else content
                 print(f"  [{i}] {role}: {preview}\n")
 
+    def _print_banner(self):
+        logo = f"""{C.agent_prefix}\
+  ██████╗ ██║  ██║ ██████╗   ██████╗  ╔██████╗
+  ██╔═══╝ ███╗███║ ██╔═══╝  ██║  ██║  ██╔══██║
+  ████╗   ██║█║██║ ████╗    ██║  ██║  ╚██████║
+  ██╔═╝   ██║ ╚██║ ██╔═╝    ██║  ██║  ██╔══██║
+  ██████╗ ██║  ██║ ██████╗ ██╔╝  ██║ ██╔╝  ██║
+  ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝   ╚═╝ ╚═╝   ╚═╝{C.reset}
+  {C.muted}Emelya — CLI AI Agent v0.1, Fairy-tale dimwit{C.reset}"""
+        print(logo)
+        print()
+        print(f"  {C.info}{t('workdir')}{C.reset} {self.config.work_dir}")
+        print(f"  {C.info}{t('session')}{C.reset} {self.session_name}")
+        print()
+
     def run(self):
         """Main REPL loop."""
-        print("=" * 50)
-        print("Aigent — CLI AI Agent")
-        print(f"  Model:   {self.active_model} ({self.llm.base_url} / {self.llm.model})")
-        print(f"  WorkDir: {self.config.work_dir}")
-        print(f"  Session: {self.session_name}")
-        print(f"  Stream:  {'on' if self.config.stream else 'off'}")
-        print("=" * 50)
+        self._print_banner()
 
-        # Check connection (non-fatal — user can switch model later)
-        print(f"\nChecking {self.active_model}...")
+        # Check connection (non-fatal)
         ok, info = self.llm.check_connection()
         if ok:
             self._update_model_display(info)
-            print(f"Connected ({info})")
+            print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {t('ready_model', model=self._model_display)}")
         else:
-            print(f"Warning: {info}")
-            print(f"Use /model to switch to another model")
-        print("\nCommands: /clear /compact /undo /drop /save /load /new /model /tools /mcp /stats /context /history /exit")
-        print("-" * 50)
+            print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {C.warning}{info}{C.reset}. {t('use_model_switch')}")
+
+        # Show MCP status collected during init
+        if self._mcp_startup_info:
+            for entry in self._mcp_startup_info:
+                name, n_tools = entry[0], entry[1]
+                is_cached = entry[2] if len(entry) > 2 else False
+                err = entry[3] if len(entry) > 3 else None
+                if err:
+                    print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} MCP {C.warning}{name}{C.reset} — {err}")
+                elif is_cached:
+                    print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} MCP {C.muted}{name}{C.reset} — {n_tools} tools ({t('cached')})")
+                else:
+                    print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} MCP {C.success}{name}{C.reset} — {n_tools} tools")
+
+        print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {t('greeting')}")
 
         self.log.session_start(
             self.config.base_url, self.config.model,
@@ -1239,9 +1309,9 @@ class REPL:
         while True:
             try:
                 print()  # blank line before prompt
-                user_input = editor.read(prompt=f"{C.user_prompt}You:{C.reset} ", history=self.input_history)
+                user_input = editor.read(prompt=f"{C.user_prompt}{t('you')}:{C.reset} ", history=self.input_history)
             except (EOFError, KeyboardInterrupt):
-                print("\n\nBye!")
+                print(f"\n\n{t('bye')}")
                 break
 
             if user_input is None:  # Ctrl+C / Escape
@@ -1253,20 +1323,21 @@ class REPL:
             # Handle /commands — anything starting with / is a command, never sent to model
             if user_input.startswith("/"):
                 if user_input in ("/exit", "/quit"):
-                    print("\nBye!")
+                    print(f"\n{t('bye')}")
                     break
                 if not self._handle_command(user_input):
                     cmd = user_input.split()[0]
-                    print(f"  Unknown command: {cmd}")
-                    print("  Available: /clear /compact /undo /drop /save /load /new /model /tools /mcp /stats /context /history /exit")
+                    print(f"  {t('unknown_cmd')}: {cmd}")
+                    print("  Available: /help /clear /compact /undo /drop /save /load /new /model /tools /mcp /stats /context /history /exit")
                 continue
 
             # Agent loop
             try:
                 self._agent_loop(user_input)
             except KeyboardInterrupt:
-                print("\n  (interrupted)")
+                print(f"\n  {t('interrupted')}")
 
         self._shutdown_mcp()
         self.log.session_end()
         self.log.close()
+        self.usage_tracker.close()
