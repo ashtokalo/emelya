@@ -22,6 +22,11 @@
   /model name            — switch model
   /model add name url model [key]  — add model
 
+  /skill                 — list skills
+  /skill name            — load and apply skill
+  /agent                 — list agents
+  /agent name task       — run agent with task
+
   /tools                 — show loaded tools
   /mcp                   — MCP server status
   /mcp add name command  — connect MCP server

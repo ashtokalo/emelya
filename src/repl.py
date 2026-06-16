@@ -612,6 +612,19 @@ class REPL:
 
                 self.log.tool_exec(tc["name"], tc["args"], result, elapsed)
 
+                # Intercept plan_mode exit — ask user approval
+                if tc["name"] == "plan_mode" and tc["args"].get("action") == "exit":
+                    try:
+                        answer = input(f"\n  {C.warning}{t('allow')}{C.reset} ").strip().lower()
+                        if answer not in ("y", "yes", "д", "да"):
+                            from tools.plan_mode import reset as plan_reset
+                            plan_reset()
+                            result = "Plan rejected by user. Ask what to change."
+                    except (EOFError, KeyboardInterrupt):
+                        from tools.plan_mode import reset as plan_reset
+                        plan_reset()
+                        result = "Plan rejected."
+
                 # Intercept planner result — execute plan
                 if (tc["name"] == "agent"
                         and tc["args"].get("name") == "planner"
@@ -911,6 +924,14 @@ class REPL:
             self._cmd_model(arg)
             return True
 
+        if cmd == "/skill":
+            self._cmd_skill(arg)
+            return True
+
+        if cmd == "/agent":
+            self._cmd_agent(arg)
+            return True
+
         return False
 
     def _cmd_model(self, arg: str = ""):
@@ -1110,6 +1131,55 @@ class REPL:
 
         tokens = self.context.estimate_tokens()
         print(f"  {t('new_session')}: {self.session_name} [{tokens} tokens]")
+
+    def _cmd_skill(self, arg: str = ""):
+        """Load a skill and inject into current context as user instruction."""
+        if not arg:
+            from tools.skill import scan_skills
+            skills = scan_skills(self.skills_dir)
+            if skills:
+                print(f"  {t('available')}:")
+                for name, desc in skills.items():
+                    print(f"    {name} — {desc}")
+            else:
+                print("  No skills available")
+            return
+
+        # Load skill content
+        result = self.registry.execute("skill", {"name": arg}, self.tool_ctx)
+        if result.startswith("Error:") or result.startswith("Unknown"):
+            print(f"  {result}")
+            return
+
+        # Inject into context as system-like instruction and run agent loop
+        self.context.add_user(f"/skill {arg}")
+        self.context.add_assistant_text(f"Skill '{arg}' loaded.")
+        # Add skill content to work context for next LLM call
+        self._agent_loop(f"I loaded skill '{arg}'. Follow its instructions. Here it is:\n{result}")
+
+    def _cmd_agent(self, arg: str = ""):
+        """Run an agent directly from command line."""
+        if not arg:
+            from tools.agent import scan_agents
+            agents = scan_agents(self.agents_dir)
+            if agents:
+                print(f"  {t('available')}:")
+                for name, desc in agents.items():
+                    print(f"    {name} — {desc}")
+            else:
+                print("  No agents available")
+            return
+
+        parts = arg.split(None, 1)
+        name = parts[0]
+        task = parts[1] if len(parts) > 1 else ""
+
+        if not task:
+            print(f"  Usage: /agent {name} <task description>")
+            return
+
+        # Run through agent loop — model will see agent result
+        self._agent_loop(f"Use agent '{name}' for this task: {task}")
 
     def _cmd_mcp(self, arg: str = ""):
         """Handle /mcp subcommands: (status), add, remove, restart."""
@@ -1453,7 +1523,7 @@ class REPL:
                 if not self._handle_command(user_input):
                     cmd = user_input.split()[0]
                     print(f"  {t('unknown_cmd')}: {cmd}")
-                    print("  Available: /help /clear /compact /undo /drop /save /load /new /model /tools /mcp /stats /context /history /exit")
+                    print("  Available: /help /clear /compact /undo /drop /save /load /new /model /skill /agent /tools /mcp /stats /context /history /exit")
                 continue
 
             # Agent loop

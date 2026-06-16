@@ -10,10 +10,18 @@ Designed for programming, file analysis, debugging, and general-purpose tasks.
 - **Tool calling** — structured function calling, not text parsing
 - **Work context isolation** — tool calls don't pollute the main context (critical for 8-32K models)
 - **Auto context trimming** — automatically trims work context when approaching 80% of context_limit
+- **Auto-detect context limit** — reads llama.cpp `/props` endpoint; per-model `max_tokens` (default 8192)
+- **Compact tool descriptions** — parameter descriptions stripped for small models (<32K context)
+- **Plan mode** — structured planning before execution (`plan_mode` tool)
+- **Task progress tracking** — multi-step progress reporting (`task` tool)
+- **Web search** — DuckDuckGo search via `web_search` tool
 - **Consecutive error detection** — after 3 errors in a row, forces the model to change approach
 - **Dynamic tool loading** — extension tools loaded on demand via `load_tools`
 - **MCP support** — connect external services with lazy loading and cached descriptions
 - **Sessions** — save/load/autosave conversations
+- **i18n** — Russian and English interface (auto-detected)
+- **Interactive line editor** — history, `@path` completion, paste block support
+- **Colored output** — themed terminal output with wait spinner and timer
 - **Pure Python** — stdlib only, no pip dependencies
 
 ## Quick Start
@@ -81,7 +89,7 @@ LiteLLM supports 100+ providers and exposes a standard OpenAI-compatible API.
 
 ## Tools
 
-### Core (always available, 11 tools)
+### Core (always available, 13 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -93,17 +101,22 @@ LiteLLM supports 100+ providers and exposes a standard OpenAI-compatible API.
 | `grep` | Search file contents with regex |
 | `list_dir` | List directory with file sizes |
 | `web_fetch` | Fetch URL, convert HTML to text |
+| `web_search` | Search the web via DuckDuckGo |
 | `skill` | Load specialized instructions |
 | `agent` | Run sub-agent for focused tasks |
+| `task` | Report progress on multi-step work |
+| `plan_mode` | Enter structured planning before execution |
+| `man` | Show detailed help for any tool |
 | `load_tools` | Dynamically load extension tools |
 
-### Extensions (loaded via `load_tools`)
+### Extensions (loaded via `load_tools`, 6 tools in 4 categories)
 
 | Category | Tools | Description |
 |----------|-------|-------------|
 | `documents` | doc_read, sheet_read | Office documents (docx, odt, pdf, xlsx, ods, csv) |
 | `binary` | hex_read, hex_write | Binary file inspection and patching |
 | `archives` | archive | Archive listing/extraction (zip, tar, gz, 7z, rar, deb) |
+| `planning` | plan_step | Add steps to a plan (used by planner agent) |
 
 ### MCP (external services)
 
@@ -114,16 +127,19 @@ Connect any MCP server. Tools are cached and loaded lazily:
 /mcp add myapi python3 ./my_server.py --env API_KEY=xxx
 ```
 
-## Agents (14)
+## Agents (16)
 
 Sub-agents run in isolated context with limited tools. The main context only receives the final result.
 Supports nesting up to 3 levels deep.
 
 **Code exploration:**
-explore_code, find_definition, find_usages, find_related, explore_dir, summarize_file
+explore_code, find_definition, find_usages, find_related, explore_dir, summarize_file, explore
 
 **Analysis & review:**
 explain_code, explain_error, review_file, code_review, security_review, lint_check
+
+**Planning:**
+planner
 
 **Binary & modification:**
 analyze_binary, add_docstrings
@@ -151,6 +167,8 @@ Instructions loaded into context on demand. Model decides when to load them.
 | `/load [name]` | Load session (no args = list sessions) |
 | `/new [name]` | Start new session |
 | `/model [name]` | Switch active model (no args = list models) |
+| `/skill [name]` | Load a skill into context (no args = list skills) |
+| `/agent <name> <task>` | Run a sub-agent with a task |
 | `/drop` | Drop last message pair from context |
 | `/stats` | Show session statistics |
 | `/tools` | Show loaded tools and extensions |
@@ -171,8 +189,8 @@ Instructions loaded into context on demand. Model decides when to load them.
 | `--port` | 8080 | llama.cpp server port |
 | `--model` | default | Model name |
 | `--temperature` | 0.7 | Generation temperature |
-| `--max-tokens` | 1024 | Max tokens per response |
-| `--context-limit` | 8000 | Context window budget (tokens) |
+| `--max-tokens` | 8192 | Max tokens per response (per-model override in models.json) |
+| `--context-limit` | 8000 | Context window budget (auto-detected from llama.cpp `/props`) |
 | `--work-dir` | . | Working directory (sandbox root) |
 | `--max-iterations` | 20 | Max tool-call iterations per query |
 | `--no-stream` | | Disable streaming |
@@ -181,7 +199,7 @@ Instructions loaded into context on demand. Model decides when to load them.
 ## Architecture
 
 ```
-src/                          — 4100 lines Python, stdlib only
+src/                          — ~6700 lines Python, stdlib only
 ├── __main__.py               — entry point
 ├── config.py                 — CLI args
 ├── repl.py                   — REPL + agent loop + session management
@@ -190,19 +208,25 @@ src/                          — 4100 lines Python, stdlib only
 ├── sandbox.py                — path validation
 ├── log.py                    — detailed session logging
 ├── mcp.py                    — MCP client (stdio JSON-RPC)
-└── tools/                    — tool registry + 16 tools
+├── i18n.py                   — internationalization (ru/en)
+├── theme.py                  — colored terminal output
+├── line_editor.py            — interactive line editor with history and @path completion
+├── input_history.py          — input history persistence
+└── tools/                    — tool registry + 21 tools
     ├── __init__.py            — ToolRegistry (core/extension, parameter validation)
     ├── read.py, write.py, edit.py
     ├── bash.py, glob_tool.py, grep.py, list_dir.py
-    ├── web_fetch.py, skill.py, agent.py, load_tools.py
+    ├── web_fetch.py, web_search.py, skill.py, agent.py, load_tools.py
+    ├── task.py, plan_mode.py, man.py
     ├── doc_read.py, sheet_read.py        (ext: documents)
     ├── hex_read.py, hex_write.py         (ext: binary)
-    └── archive.py                        (ext: archives)
+    ├── archive.py                        (ext: archives)
+    └── plan_step.py                      (ext: planning)
 
 models.json                   — multi-model configuration
 prompts/system.md             — system prompt template
 skills/*.md                   — 15 skill files
-agents/*.md                   — 14 agent templates
+agents/*.md                   — 16 agent templates
 docs/                         — architecture documentation
 .emelya/                      — per-project data (created at runtime)
 ├── sessions/                 — saved sessions (context.json + log.txt)
@@ -223,7 +247,7 @@ during long tool-calling chains.
 
 ```
 System prompt:           ~350 tokens (always)
-Core tools (11):        ~1200 tokens (always)
+Core tools (13):        ~1500 tokens (always, compact mode for <32K context)
 Per conversation turn:   ~100 tokens (user + assistant only, no tool results)
 Extension tools:        ~200-300 tokens (only when loaded)
 ```

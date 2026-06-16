@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-06-14
+
+### Added
+- **New core tools**: web_search (DuckDuckGo), task (progress tracking), plan_mode (structured planning), man (detailed tool help) — core tools now 13
+- **New extension tool**: plan_step in `planning` category — extension tools now 6 in 4 categories
+- **New agents**: explore (general exploration), planner (plan creation) — agents now 16
+- **New commands**: `/skill` (load skill into context), `/agent` (run sub-agent directly)
+- **Plan mode** — model can enter structured planning before execution via `plan_mode` tool
+- **Task progress tracking** — multi-step progress reporting via `task` tool
+- **Web search** — DuckDuckGo HTML lite search via `web_search` tool
+- **Compact tool descriptions** — parameter descriptions stripped for models with <32K context to save tokens
+- **man tool** — detailed `.md`-based help for any tool, loaded on demand
+- **i18n** — Russian and English interface, auto-detected from locale (`src/i18n.py`)
+- **Colored output** — themed terminal output via `src/theme.py`
+- **Interactive line editor** — custom line editor with input history, `@path` completion, and paste block support (`src/line_editor.py`, `src/input_history.py`)
+- **Wait spinner with timer** — visual feedback during LLM requests
+- **Auto-detect context limit** — reads `n_ctx` from llama.cpp `/props` endpoint
+- **Per-model max_tokens** — default raised to 8192, configurable per model in `models.json`
+
 ## [0.1.0] - 2026-06-14
 
 ### Added

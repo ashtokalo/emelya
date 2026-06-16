@@ -144,6 +144,14 @@ class ToolRegistry:
 
     def execute(self, name: str, args: dict, ctx: ToolContext) -> str:
         """Execute a tool call, return result string."""
+        # Block write tools in plan mode
+        try:
+            from tools.plan_mode import is_active, BLOCKED_TOOLS
+            if is_active() and name in BLOCKED_TOOLS:
+                return f"Error: '{name}' is blocked in plan mode. Use plan_mode(action='exit', plan='...') first."
+        except ImportError:
+            pass
+
         all_tools = self._all_tools()
         if name not in all_tools:
             # Check if it's in an unloaded extension
