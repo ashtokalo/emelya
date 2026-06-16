@@ -98,20 +98,42 @@ class ToolRegistry:
             except Exception as e:
                 print(f"Warning: failed to load tool {py_file.name}: {e}")
 
-    def get_tools(self, names: list = None) -> list:
+    def get_tools(self, names: list = None, compact: bool = False) -> list:
         """Return tool definitions for LLM API.
         names=None → core + loaded extensions.
-        names=list → only those specific tools (for sub-agents)."""
+        names=list → only those specific tools (for sub-agents).
+        compact=True → strip param descriptions to save tokens."""
         if names is not None:
             all_tools = self._all_tools()
-            return [all_tools[n]["definition"] for n in names if n in all_tools]
+            defs = [all_tools[n]["definition"] for n in names if n in all_tools]
+        else:
+            defs = [t["definition"] for t in self._core.values()]
+            for cat in self._loaded:
+                if cat in self._extensions:
+                    for t in self._extensions[cat].values():
+                        defs.append(t["definition"])
 
-        result = [t["definition"] for t in self._core.values()]
-        for cat in self._loaded:
-            if cat in self._extensions:
-                for t in self._extensions[cat].values():
-                    result.append(t["definition"])
-        return result
+        if compact:
+            return [self._compact_def(d) for d in defs]
+        return defs
+
+    @staticmethod
+    def _compact_def(definition: dict) -> dict:
+        """Strip descriptions from parameters, shorten tool description."""
+        import copy
+        d = copy.deepcopy(definition)
+        fn = d.get("function", {})
+        # Shorten description to first sentence
+        desc = fn.get("description", "")
+        for i, c in enumerate(desc):
+            if c in ".!?" and i > 5:
+                fn["description"] = desc[:i + 1]
+                break
+        # Remove parameter descriptions
+        params = fn.get("parameters", {})
+        for prop in params.get("properties", {}).values():
+            prop.pop("description", None)
+        return d
 
     def _all_tools(self) -> dict:
         """All tools (core + all extensions) by name."""

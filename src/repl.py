@@ -176,6 +176,7 @@ class REPL:
                     model_ctx_limit = limit
                     break
         self.context.context_limit = model_ctx_limit or self.config.context_limit
+        self._use_compact_tools = self.context.context_limit < 32000
         # Apply max_tokens: per-model > CLI default
         self.config.max_tokens = cfg.get("max_tokens") or self.config.max_tokens
         return LLMClient(
@@ -569,7 +570,7 @@ class REPL:
         # No auto-trim — user controls context size via /compact and /clear
 
         # First call — from main context (update usage for accurate token tracking)
-        tools = self.registry.get_tools()
+        tools = self.registry.get_tools(compact=self._use_compact_tools)
         try:
             response = self._llm_call(self.context.get_messages(), tools)
             self.context.update_usage(response.get("usage"))
@@ -638,7 +639,7 @@ class REPL:
                 work_messages.append({"role": "user", "content": nudge})
 
             # Next LLM call in work context (refresh tools — load_tools may have added new ones)
-            tools = self.registry.get_tools()
+            tools = self.registry.get_tools(compact=self._use_compact_tools)
             try:
                 response = self._llm_call(work_messages, tools)
             except LLMError as e:
