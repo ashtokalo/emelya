@@ -496,12 +496,17 @@ class REPL:
 
         # Update display name from every API response
         mid = response.get("model_id")
-        if mid and mid != self._model_display:
-            self._model_display = mid
+        if mid:
+            # Strip .gguf/.bin for display
+            display = mid
+            for suffix in (".gguf", ".bin"):
+                if display.endswith(suffix):
+                    display = display[:-len(suffix)]
+            self._model_display = display
 
         self.log.response(
             response.get("content"), response.get("tool_calls"),
-            usage=response.get("usage"), model=mid or self.llm.model,
+            usage=response.get("usage"), model=mid or self._model_display,
         )
         return response
 
@@ -1130,13 +1135,8 @@ class REPL:
         self._update_dynamic_descriptions()
 
     def _print_stats(self):
-        """Show token usage stats across all sessions."""
+        """Show token usage stats: current session + project total."""
         stats = collect_stats(self.sessions_dir)
-        totals = stats["totals"]
-
-        if totals["requests"] == 0:
-            print("  No usage data yet")
-            return
 
         def fmt(n):
             if n >= 1_000_000:
@@ -1145,24 +1145,40 @@ class REPL:
                 return f"{n / 1_000:.1f}K"
             return str(n)
 
-        print(f"\n  === Token Usage Stats ===\n")
+        def print_section(title, by_model, by_date, totals):
+            if totals["requests"] == 0:
+                print(f"\n  {title}: no data")
+                return
+            print(f"\n  === {title} ===\n")
+            if by_model:
+                print("  By model:")
+                for model, m in sorted(by_model.items()):
+                    print(f"    {model}: {fmt(m['total'])} tokens"
+                          f" ({fmt(m['prompt'])} in + {fmt(m['completion'])} out)"
+                          f" / {m['requests']} req")
+            if by_date:
+                print(f"\n  By date:")
+                for date, d in sorted(by_date.items()):
+                    print(f"    {date}: {fmt(d['total'])} tokens / {d['requests']} req")
+            print(f"\n  Total: {fmt(totals['total'])} tokens / {totals['requests']} req")
 
-        # By model
-        print("  By model:")
-        for model, m in sorted(stats["by_model"].items()):
-            print(f"    {model}: {fmt(m['total'])} tokens"
-                  f" ({fmt(m['prompt'])} prompt + {fmt(m['completion'])} completion)"
-                  f" / {m['requests']} requests")
+        # Current session
+        cur = stats.get("by_session", {}).get(self.session_name)
+        if cur:
+            print_section(
+                f"Session: {self.session_name}",
+                cur.get("by_model", {}),
+                cur.get("by_date", {}),
+                cur,
+            )
 
-        # By date
-        print(f"\n  By date:")
-        for date, d in stats["by_date"].items():
-            print(f"    {date}: {fmt(d['total'])} tokens / {d['requests']} requests")
-
-        # Totals
-        print(f"\n  Total: {fmt(totals['total'])} tokens"
-              f" ({fmt(totals['prompt'])} prompt + {fmt(totals['completion'])} completion)"
-              f" / {totals['requests']} requests")
+        # Project total
+        print_section(
+            "Project total",
+            stats.get("by_model", {}),
+            stats.get("by_date", {}),
+            stats.get("totals", {"requests": 0}),
+        )
 
     def _print_full_context(self):
         """Print the full conversation context."""

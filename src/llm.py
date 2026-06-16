@@ -251,6 +251,7 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             data["tools"] = tools
@@ -259,7 +260,7 @@ class LLMClient:
         for attempt in range(self.retry + 1):
             try:
                 resp = self._post(url, data, timeout=300)
-                content, tool_calls, usage = self._read_stream(resp, on_content)
+                content, tool_calls, usage, stream_model_id = self._read_stream(resp, on_content)
                 resp.close()
 
                 parsed_tc = None
@@ -297,6 +298,7 @@ class LLMClient:
                     "tool_calls": parsed_tc,
                     "raw": raw,
                     "usage": usage,
+                    "model_id": stream_model_id,
                 }
             except urllib.error.HTTPError as e:
                 body = ""
@@ -318,11 +320,11 @@ class LLMClient:
         raise LLMError(f"Connection failed after {self.retry + 1} attempts: {last_err}")
 
     def _read_stream(self, resp, on_content) -> tuple:
-        """Read SSE stream, return (content_str, tool_calls_list, usage_dict)."""
+        """Read SSE stream, return (content_str, tool_calls_list, usage_dict, model_id)."""
         content_parts = []
-        # tool_calls accumulated by index: {index: {id, name, _arguments}}
         tc_accum = {}
         usage = None
+        model_id = None
 
         try:
             for raw_line in resp:
@@ -339,9 +341,10 @@ class LLMClient:
                 except json.JSONDecodeError:
                     continue
 
-                # Usage may come in final chunk
                 if "usage" in chunk:
                     usage = chunk["usage"]
+                if "model" in chunk and not model_id:
+                    model_id = chunk["model"]
 
                 choices = chunk.get("choices")
                 if not choices:
@@ -380,4 +383,4 @@ class LLMClient:
 
         content = "".join(content_parts)
         tool_calls = [tc_accum[i] for i in sorted(tc_accum)] if tc_accum else None
-        return content, tool_calls, usage
+        return content, tool_calls, usage, model_id

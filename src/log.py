@@ -110,16 +110,22 @@ class SessionLog:
 
         self._write(f"Cumulative tokens: {self._cumulative_tokens}")
 
-        # Structured usage line for stats aggregation
+        # Structured usage line for stats aggregation (always write, estimate if needed)
         if usage:
             u = {
                 "prompt": usage.get("prompt_tokens", 0),
                 "completion": usage.get("completion_tokens", 0),
                 "total": usage.get("total_tokens", 0),
             }
-            if model:
-                u["model"] = model
-            self._write(f"USAGE: {json.dumps(u)}")
+        else:
+            u = {
+                "prompt": 0,
+                "completion": self._estimate_tokens(content or ""),
+                "total": self._estimate_tokens(content or ""),
+            }
+        if model:
+            u["model"] = model
+        self._write(f"USAGE: {json.dumps(u)}")
         self._write("")
 
     def tool_exec(self, name: str, args: dict, result: str, elapsed_ms: int = 0):
@@ -168,15 +174,15 @@ def collect_stats(sessions_dir: Path) -> dict:
 
         session_name = session_dir.name
         session_date = None
-        session_stats = {"requests": 0, "prompt": 0, "completion": 0, "total": 0}
+        s_totals = {"requests": 0, "prompt": 0, "completion": 0, "total": 0}
+        s_by_model = {}
+        s_by_date = {}
 
         try:
             for line in log_path.read_text(encoding="utf-8").splitlines():
-                # Extract session date from "Started: YYYY-MM-DD HH:MM:SS"
                 if line.startswith("Started: "):
-                    session_date = line[9:19]  # YYYY-MM-DD
+                    session_date = line[9:19]
 
-                # Parse USAGE lines
                 if line.startswith("USAGE: "):
                     try:
                         u = json.loads(line[7:])
@@ -189,29 +195,24 @@ def collect_stats(sessions_dir: Path) -> dict:
                     model = u.get("model", "unknown")
                     date = session_date or "unknown"
 
-                    # by_model
-                    if model not in by_model:
-                        by_model[model] = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
-                    by_model[model]["prompt"] += prompt
-                    by_model[model]["completion"] += completion
-                    by_model[model]["total"] += total
-                    by_model[model]["requests"] += 1
+                    def _add(d, key, p, c, t):
+                        if key not in d:
+                            d[key] = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
+                        d[key]["prompt"] += p
+                        d[key]["completion"] += c
+                        d[key]["total"] += t
+                        d[key]["requests"] += 1
 
-                    # by_date
-                    if date not in by_date:
-                        by_date[date] = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
-                    by_date[date]["prompt"] += prompt
-                    by_date[date]["completion"] += completion
-                    by_date[date]["total"] += total
-                    by_date[date]["requests"] += 1
+                    _add(by_model, model, prompt, completion, total)
+                    _add(by_date, date, prompt, completion, total)
+                    _add(s_by_model, model, prompt, completion, total)
+                    _add(s_by_date, date, prompt, completion, total)
 
-                    # session
-                    session_stats["requests"] += 1
-                    session_stats["prompt"] += prompt
-                    session_stats["completion"] += completion
-                    session_stats["total"] += total
+                    s_totals["requests"] += 1
+                    s_totals["prompt"] += prompt
+                    s_totals["completion"] += completion
+                    s_totals["total"] += total
 
-                    # totals
                     totals["prompt"] += prompt
                     totals["completion"] += completion
                     totals["total"] += total
@@ -220,8 +221,12 @@ def collect_stats(sessions_dir: Path) -> dict:
         except OSError:
             continue
 
-        if session_stats["requests"] > 0:
-            by_session[session_name] = session_stats
+        if s_totals["requests"] > 0:
+            by_session[session_name] = {
+                **s_totals,
+                "by_model": s_by_model,
+                "by_date": s_by_date,
+            }
 
     return {
         "by_model": by_model,
