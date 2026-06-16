@@ -8,6 +8,8 @@ from pathlib import Path
 
 from config import Config
 from context import Context
+from input_history import InputHistory
+from line_editor import LineEditor, strip_markers
 from llm import LLMClient, LLMError
 from log import SessionLog, collect_stats
 from mcp import MCPClient, MCPError, compact_tool_description, load_mcp_config, load_cache, save_cache
@@ -836,6 +838,7 @@ class REPL:
         self.log.event(f"Session loaded: {name}")
         self.tool_ctx.files_read.clear()
         self.tool_ctx.loaded_skills.clear()
+        self.input_history = InputHistory(str(self._session_dir() / "history"))
 
         tokens = self.context.estimate_tokens()
         n_msgs = len(self.context.messages)
@@ -860,6 +863,7 @@ class REPL:
             self.config.base_url, self.config.model,
             str(self.config.work_dir), self.session_name,
         )
+        self.input_history = InputHistory(str(self._session_dir() / "history"))
 
         tokens = self.context.estimate_tokens()
         print(f"  New session: {self.session_name} [{tokens} tokens]")
@@ -1131,14 +1135,22 @@ class REPL:
             str(self.config.work_dir), self.session_name,
         )
 
+        # Interactive line editor with per-session history
+        self.input_history = InputHistory(str(self._session_dir() / "history"))
+        editor = LineEditor(work_dir=self.config.work_dir)
+
         while True:
             try:
-                user_input = input("\nYou: ").strip()
+                print()  # blank line before prompt
+                user_input = editor.read(prompt="You: ", history=self.input_history)
             except (EOFError, KeyboardInterrupt):
                 print("\n\nBye!")
                 break
 
-            if not user_input or not user_input.strip():
+            if user_input is None:  # Ctrl+C / Escape
+                continue
+            user_input = user_input.strip()
+            if not user_input:
                 continue
 
             # Handle /commands — anything starting with / is a command, never sent to model
