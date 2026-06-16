@@ -27,6 +27,7 @@ class ToolContext:
     session_log: object = None  # SessionLog for usage tracking
     usage_tracker: object = None  # UsageTracker for project-wide stats
     tool_registry: object = None
+    get_routed_client: Callable = None  # (operation) -> LLMClient or None
     config: object = None
 
     def backup_file(self, path: Path):

@@ -92,6 +92,7 @@ class REPL:
         self._models = self._load_models()
         self.active_model = config.model_name or "local"
         self._model_display = self.active_model  # updated from API response
+        self._manual_model = False  # True = routing disabled, use self.llm directly
         self.llm = self._create_llm_client()
 
         # Session management
@@ -110,6 +111,7 @@ class REPL:
             config=config,
             session_log=self.log,
             usage_tracker=self.usage_tracker,
+            get_routed_client=self._resolve_client_for_operation,
         )
 
         # Load tools
@@ -137,17 +139,19 @@ class REPL:
     # --- Model management ---
 
     def _load_models(self) -> dict:
-        """Load models from .emelya/models.json. Always includes 'local' from CLI args."""
+        """Load models and routing from .emelya/models.json."""
         models = {
             "local": {
                 "base_url": self.config.base_url,
                 "model": self.config.model,
             }
         }
+        self._routing = {}  # operation → [model_name, ...]
         if self._models_path.exists():
             try:
                 data = json.loads(self._models_path.read_text(encoding="utf-8"))
                 models.update(data.get("models", {}))
+                self._routing = data.get("routing", {})
             except (json.JSONDecodeError, OSError):
                 pass
         return models
@@ -155,11 +159,91 @@ class REPL:
     def _save_models(self):
         """Save models config (excluding 'local' which comes from CLI)."""
         to_save = {k: v for k, v in self._models.items() if k != "local"}
+        data = {"models": to_save}
+        if self._routing:
+            data["routing"] = self._routing
         self._models_path.parent.mkdir(parents=True, exist_ok=True)
         self._models_path.write_text(
-            json.dumps({"models": to_save}, indent=2, ensure_ascii=False),
+            json.dumps(data, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def _get_client(self, model_name: str) -> LLMClient:
+        """Get or create LLM client for a model by name. Cached."""
+        if not hasattr(self, "_client_cache"):
+            self._client_cache = {}
+        if model_name in self._client_cache:
+            return self._client_cache[model_name]
+        cfg = self._models.get(model_name)
+        if not cfg:
+            return None
+        client = LLMClient(
+            base_url=cfg.get("base_url", self.config.base_url),
+            model=cfg.get("model", "default"),
+            api_key=cfg.get("api_key"),
+        )
+        self._client_cache[model_name] = client
+        return client
+
+    def _call_with_routing(self, operation: str, messages, tools, **kwargs):
+        """Call LLM with failover chain based on routing config.
+        Falls back to self.llm if no routing for operation."""
+        chain = self._routing.get(operation, self._routing.get("default"))
+        if not chain:
+            # No routing — use active model directly
+            if self.config.stream:
+                return self.llm.stream_chat(messages, tools, **kwargs)
+            return self.llm.chat(messages, tools, **kwargs)
+
+        last_err = None
+        for model_name in chain:
+            client = self._get_client(model_name)
+            if not client:
+                continue
+            try:
+                # Quick health check (1s timeout)
+                ok, _ = client.check_connection()
+                if not ok:
+                    continue
+                # Use streaming for default operation
+                if operation == "default" and self.config.stream:
+                    resp = client.stream_chat(messages, tools, **kwargs)
+                else:
+                    resp = client.chat(messages, tools, **kwargs)
+                # Update display name from response
+                mid = resp.get("model_id")
+                if mid:
+                    display = mid
+                    for suffix in (".gguf", ".bin"):
+                        if display.endswith(suffix):
+                            display = display[:-len(suffix)]
+                    self._model_display = display
+                return resp
+            except Exception as e:
+                last_err = e
+                continue
+
+        raise LLMError(f"All models in routing chain '{operation}' failed: {last_err}")
+
+    def _resolve_client_for_operation(self, operation: str):
+        """Resolve LLM client for a given operation using routing chain.
+        Returns (client, model_name) or (self.llm, self.active_model)."""
+        if self._manual_model or not self._routing:
+            return self.llm, self.active_model
+        chain = self._routing.get(operation, self._routing.get("default"))
+        if not chain:
+            return self.llm, self.active_model
+        for model_name in chain:
+            client = self._get_client(model_name)
+            if not client:
+                continue
+            try:
+                ok, _ = client.check_connection()
+                if ok:
+                    return client, model_name
+            except Exception:
+                continue
+        return self.llm, self.active_model
 
     def _create_llm_client(self) -> LLMClient:
         """Create LLM client for the active model."""
@@ -186,7 +270,12 @@ class REPL:
         )
 
     def _switch_model(self, name: str):
-        """Switch to a different model."""
+        """Switch to a specific model. Disables routing (manual override)."""
+        if name == "auto":
+            # Re-enable routing
+            self._manual_model = False
+            print(f"  {C.info}Routing enabled{C.reset}")
+            return
         if name not in self._models:
             print(f"  {t('unknown_model')}: {name}")
             self._list_models()
@@ -194,6 +283,7 @@ class REPL:
         prev = self.active_model
         self.active_model = name
         self._model_display = name
+        self._manual_model = True  # disable routing
         self.llm = self._create_llm_client()
         self.tool_ctx.llm_client = self.llm
         self.log.event(f"Model switched: {prev} -> {name} ({self.llm.base_url} / {self.llm.model})")
@@ -222,13 +312,19 @@ class REPL:
 
     def _list_models(self):
         for name, cfg in self._models.items():
-            active = " *" if name == self.active_model else ""
+            active = " *" if name == self.active_model and self._manual_model else ""
             url = cfg.get("base_url", "?")
             model = cfg.get("model", "?")
             has_key = " [key]" if cfg.get("api_key") else ""
             ctx = cfg.get("context_limit")
             ctx_str = f" ctx:{ctx // 1000}K" if ctx else ""
             print(f"  {name}: {url} / {model}{has_key}{ctx_str}{active}")
+        if self._routing:
+            mode = "manual" if self._manual_model else "auto"
+            print(f"  {C.muted}Routing: {mode} (/model auto to enable, /model <name> to override){C.reset}")
+            if not self._manual_model:
+                for op, chain in self._routing.items():
+                    print(f"    {op}: {' → '.join(chain)}")
 
     def _init_mcp(self):
         """Register MCP servers from cache. No connections at startup.
@@ -478,21 +574,28 @@ class REPL:
         if truncated:
             print(f"  {C.muted}... ({len(lines)} lines total){C.reset}")
 
-    def _llm_call(self, messages, tools):
-        """Single LLM call with streaming support and wait spinner."""
+    def _llm_call(self, messages, tools, operation="default"):
+        """Single LLM call with streaming, spinner, and routing support."""
         url = f"{self.llm.base_url}/v1/chat/completions"
         self.log.request(url, messages, tools)
 
         tokens = self.context.estimate_tokens()
         _name = t('emelya')
         label = f"{_name} ({self._model_display}, {tokens} tok)"
-        colored_prefix_tpl = f"\n{C.agent_prefix}{_name}{C.reset} ({C.muted}{self._model_display}, {{tok}} tok, {{elapsed:.1f}}s{C.reset}): "
+
+        def _make_prefix(elapsed):
+            return f"\n{C.agent_prefix}{_name}{C.reset} ({C.muted}{self._model_display}, {tokens} tok, {elapsed:.1f}s{C.reset}): "
 
         spinner = _WaitSpinner(label)
         spinner.start()
         t0 = time.monotonic()
 
-        if self.config.stream:
+        # Use routing if configured and not manually overridden
+        has_routing = (not self._manual_model
+                       and (operation in self._routing or "default" in self._routing))
+        call_kwargs = dict(temperature=self.config.temperature, max_tokens=self.config.max_tokens)
+
+        if self.config.stream and not has_routing:
             prefix_printed = False
 
             def _on_content(text):
@@ -500,36 +603,41 @@ class REPL:
                 if not prefix_printed:
                     spinner.stop()
                     elapsed = time.monotonic() - t0
-                    prefix = colored_prefix_tpl.format(tok=tokens, elapsed=elapsed)
+                    prefix = _make_prefix(elapsed)
                     print(prefix, end="", flush=True)
                     prefix_printed = True
                 print(text, end="", flush=True)
 
             try:
                 response = self.llm.stream_chat(
-                    messages=messages,
-                    tools=tools,
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
-                    on_content=_on_content,
+                    messages=messages, tools=tools,
+                    on_content=_on_content, **call_kwargs,
                 )
             finally:
                 spinner.stop()
             if prefix_printed:
                 print()
+        elif has_routing:
+            try:
+                response = self._call_with_routing(
+                    operation, messages, tools, **call_kwargs,
+                )
+            finally:
+                spinner.stop()
+            if response.get("content"):
+                elapsed = time.monotonic() - t0
+                prefix = _make_prefix(elapsed)
+                print(f"{prefix}{response['content']}")
         else:
             try:
                 response = self.llm.chat(
-                    messages=messages,
-                    tools=tools,
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
+                    messages=messages, tools=tools, **call_kwargs,
                 )
             finally:
                 spinner.stop()
             elapsed = time.monotonic() - t0
             if response.get("content"):
-                prefix = colored_prefix_tpl.format(tok=tokens, elapsed=elapsed)
+                prefix = _make_prefix(elapsed)
                 print(f"{prefix}{response['content']}")
 
         # Update display name from every API response
@@ -1475,6 +1583,11 @@ class REPL:
             ctx_info = f", ctx:{self.context.context_limit // 1000}K"
             print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {t('ready_model', model=self._model_display)}{C.muted}{ctx_info}{C.reset}")
         else:
+            # Translate known error messages
+            if info == "Server unavailable":
+                info = t("server_unavailable")
+            elif "Authentication failed" in info:
+                info = t("auth_failed")
             print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {C.warning}{info}{C.reset}. {t('use_model_switch')}")
 
         # Show MCP status collected during init

@@ -2,10 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-06-14
+
+### Added
+- **Model routing** — failover chains per operation in `models.json` `routing` key; `/model auto` enables, `/model <name>` overrides
+- **Agent auto-classification** — agents with read-only tools (read, glob, grep) routed as `agent_light`; agents with write tools routed as `agent`; planner routed as `planner`
+- **Routing operations**: `default`, `planner`, `agent`, `agent_light` — each with its own failover chain
+- **Routed model display** — sub-agents show which model they're using (`via deepseek`)
+
+### Fixed
+- **Nudge placement** — nudges moved before LLM call (after tool results), preventing 400 errors when nudge broke tool_call→tool_result chain
+- **400 error poisoning** — clean error summary saved to main context instead of orphaned tool_calls
+- **Usage pollution** — work context LLM calls no longer update main context's last_usage (prevented incorrect trimming)
+
 ## [0.2.0] - 2026-06-14
 
 ### Added
-- **New core tools**: web_search (DuckDuckGo), task (progress tracking), plan_mode (structured planning), man (detailed tool help) — core tools now 13
+- **New core tools**: web_search (DuckDuckGo), task (progress tracking), plan_mode (structured planning), man (detailed tool help) — core tools now 15
 - **New extension tool**: plan_step in `planning` category — extension tools now 6 in 4 categories
 - **New agents**: explore (general exploration), planner (plan creation) — agents now 16
 - **New commands**: `/skill` (load skill into context), `/agent` (run sub-agent directly)

@@ -7,9 +7,10 @@ Designed for programming, file analysis, debugging, and general-purpose tasks.
 
 - **Multi-model** — supports llama.cpp (local), OpenAI, DeepSeek, OpenRouter, and any OpenAI-compatible API
 - **Any model** — works with Qwen, Llama, Mistral, Gemma, GPT, DeepSeek, and more
+- **Model routing** — failover chains per operation (planner → cloud, agents → local) with `/model auto`
+- **Agent auto-classification** — read-only agents routed as `agent_light`, write agents as `agent`
 - **Tool calling** — structured function calling, not text parsing
 - **Work context isolation** — tool calls don't pollute the main context (critical for 8-32K models)
-- **Auto context trimming** — automatically trims work context when approaching 80% of context_limit
 - **Auto-detect context limit** — reads llama.cpp `/props` endpoint; per-model `max_tokens` (default 8192)
 - **Compact tool descriptions** — parameter descriptions stripped for small models (<32K context)
 - **Plan mode** — structured planning before execution (`plan_mode` tool)
@@ -57,6 +58,12 @@ Configure models in `models.json`:
     "host": "openrouter.ai",
     "api_key": "sk-or-...",
     "model": "anthropic/claude-3.5-sonnet"
+  },
+  "routing": {
+    "default": ["local"],
+    "planner": ["deepseek", "local"],
+    "agent": ["deepseek", "local"],
+    "agent_light": ["local"]
   }
 }
 ```
@@ -64,6 +71,22 @@ Configure models in `models.json`:
 Switch models at runtime with `/model` command or at startup with `--use NAME`.
 
 The prompt displays the active model name: `Emelya(local, 350 tok):` or `Emelya(deepseek, 350 tok):`.
+
+### Model Routing
+
+Routing assigns different models to different operations via failover chains:
+
+| Operation | Description |
+|-----------|-------------|
+| `default` | Main conversation loop |
+| `planner` | Planner agent (needs strong reasoning) |
+| `agent` | Write agents (edit, bash, etc.) |
+| `agent_light` | Read-only agents (explore, grep, read only) |
+
+Agents are **auto-classified** by their tools: if an agent only uses read-only tools (read, glob, grep), it's routed as `agent_light`. Agents with write tools (edit, bash, write) are routed as `agent`.
+
+- `/model auto` — enable routing (use chains from models.json)
+- `/model <name>` — manual override (disables routing, all operations use this model)
 
 ### GigaChat, YandexGPT and other non-OpenAI providers
 
@@ -89,7 +112,7 @@ LiteLLM supports 100+ providers and exposes a standard OpenAI-compatible API.
 
 ## Tools
 
-### Core (always available, 13 tools)
+### Core (always available, 15 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -240,8 +263,8 @@ The agent uses **work context isolation**: when the model calls tools, the tool 
 live in a temporary work context. Only the user message and final text response are saved to the
 main context. This is critical for small models with 8-32K context windows.
 
-Work context is **auto-trimmed** when it approaches 80% of context_limit, preventing overflows
-during long tool-calling chains.
+Work context is bounded by `--max-iterations` (default 20). Progressive nudges warn the model
+when iterations are running out, and the last step forces a final answer.
 
 ### Token Budget (typical 8K model)
 

@@ -119,6 +119,12 @@ def execute(args: dict, ctx) -> str:
     allowed_tools = meta.get("tools", ["read", "glob", "grep"])
     max_steps = meta.get("max_steps", 5)
 
+    # Classify agent: light (read-only) vs full
+    WRITE_TOOLS = {"write", "edit", "bash", "agent", "hex_write"}
+    agent_operation = "agent_light" if not (set(allowed_tools) & WRITE_TOOLS) else "agent"
+    if name == "planner":
+        agent_operation = "planner"
+
     # Nested agents only if explicitly listed in frontmatter tools
     next_depth = ctx.agent_depth + 1
 
@@ -142,6 +148,7 @@ def execute(args: dict, ctx) -> str:
         ctx=ctx,
         depth=next_depth,
         agent_name=name,
+        operation=agent_operation,
     )
 
     # If planner — return plan as JSON instead of text
@@ -153,8 +160,9 @@ def execute(args: dict, ctx) -> str:
 
 
 def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
-                    ctx, depth: int = 1, agent_name: str = "") -> str:
-    """Run isolated agent loop with progress output. Returns final text."""
+                    ctx, depth: int = 1, agent_name: str = "",
+                    operation: str = "agent") -> str:
+    """Run isolated agent loop with progress output and routing support."""
     import sys
     import time
     from tools import ToolContext
@@ -170,6 +178,15 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
     messages = [{"role": "user", "content": prompt}]
     tools = ctx.tool_registry.get_tools(allowed_tools)
 
+    # Resolve LLM client via routing
+    llm_client = ctx.llm_client
+    routed_model = ""
+    if ctx.get_routed_client:
+        try:
+            llm_client, routed_model = ctx.get_routed_client(operation)
+        except Exception:
+            pass
+
     sub_ctx = ToolContext(
         work_dir=ctx.work_dir,
         sandbox=ctx.sandbox,
@@ -179,9 +196,18 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         agent_depth=depth,
         max_agent_depth=ctx.max_agent_depth,
         agents_dir=ctx.agents_dir,
-        llm_client=ctx.llm_client,
+        llm_client=llm_client,
         tool_registry=ctx.tool_registry,
+        session_log=ctx.session_log,
+        usage_tracker=ctx.usage_tracker,
+        get_routed_client=ctx.get_routed_client,
     )
+
+    if routed_model and routed_model != "local":
+        try:
+            print(f"{indent}  {_C.muted}via {routed_model}{_C.reset}", flush=True)
+        except Exception:
+            pass
 
     action_log = []  # track what agent did for error reporting
 
@@ -191,14 +217,14 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         sys.stdout.flush()
 
         try:
-            response = ctx.llm_client.chat(
+            response = llm_client.chat(
                 messages=messages,
                 tools=tools if tools else None,
                 temperature=ctx.config.temperature if ctx.config else 0.7,
                 max_tokens=ctx.config.max_tokens if ctx.config else 1024,
             )
             _usage = response.get("usage")
-            _model = response.get("model_id") or (ctx.llm_client.model if ctx.llm_client else None)
+            _model = response.get("model_id") or (llm_client.model if llm_client else None)
             _log = ctx.session_log
             if _log:
                 _log.response(
@@ -294,7 +320,7 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
             max_tokens=ctx.config.max_tokens if ctx.config else 1024,
         )
         _usage = response.get("usage")
-        _model = response.get("model_id") or (ctx.llm_client.model if ctx.llm_client else None)
+        _model = response.get("model_id") or (llm_client.model if llm_client else None)
         _log = ctx.session_log
         if _log:
             _log.response(

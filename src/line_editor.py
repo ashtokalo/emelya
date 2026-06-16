@@ -407,26 +407,53 @@ class LineEditor:
                     self._draw(prompt, buf, cursor)
                 continue
 
-            # --- Tab: @path completion ---
+            # --- Tab: completion (@path, /command args) ---
             if key == KEY_TAB or key == KEY_SHIFT_TAB:
-                at_pos, query = self._find_at_query(buf, cursor)
-                if at_pos >= 0:
-                    if comp_idx >= 0 and comp_items and comp_at_pos == at_pos:
+                text = "".join(c for c in buf if isinstance(c, str))
+                completed = False
+
+                # Command argument completion: /agent, /skill, /model, /load
+                cmd_match = self._find_cmd_query(text, cursor, buf)
+                if cmd_match:
+                    cmd, start_pos, query = cmd_match
+                    if comp_idx >= 0 and comp_items and comp_at_pos == start_pos:
                         if key == KEY_SHIFT_TAB:
                             comp_idx = (comp_idx - 1) % len(comp_items)
                         else:
                             comp_idx = (comp_idx + 1) % len(comp_items)
                     else:
-                        comp_items = path_completer(self.work_dir, query)
-                        comp_at_pos = at_pos
+                        comp_items = self._command_completer(cmd, query)
+                        comp_at_pos = start_pos
                         comp_idx = 0 if comp_items else -1
                     if comp_idx >= 0 and comp_items:
-                        new_text = "@" + comp_items[comp_idx]
-                        del buf[at_pos:cursor]
+                        del buf[start_pos:cursor]
+                        new_text = comp_items[comp_idx]
                         for i, ch in enumerate(new_text):
-                            buf.insert(at_pos + i, ch)
-                        cursor = at_pos + len(new_text)
+                            buf.insert(start_pos + i, ch)
+                        cursor = start_pos + len(new_text)
                         self._draw(prompt, buf, cursor)
+                    completed = True
+
+                # @path completion
+                if not completed:
+                    at_pos, query = self._find_at_query(buf, cursor)
+                    if at_pos >= 0:
+                        if comp_idx >= 0 and comp_items and comp_at_pos == at_pos:
+                            if key == KEY_SHIFT_TAB:
+                                comp_idx = (comp_idx - 1) % len(comp_items)
+                            else:
+                                comp_idx = (comp_idx + 1) % len(comp_items)
+                        else:
+                            comp_items = path_completer(self.work_dir, query)
+                            comp_at_pos = at_pos
+                            comp_idx = 0 if comp_items else -1
+                        if comp_idx >= 0 and comp_items:
+                            new_text = "@" + comp_items[comp_idx]
+                            del buf[at_pos:cursor]
+                            for i, ch in enumerate(new_text):
+                                buf.insert(at_pos + i, ch)
+                            cursor = at_pos + len(new_text)
+                            self._draw(prompt, buf, cursor)
                 continue
 
             # --- Character input ---
@@ -453,6 +480,92 @@ class LineEditor:
             elif isinstance(key, str):
                 chars.append(key)
         return "".join(chars)
+
+    # Commands that support Tab completion for their first argument
+    _COMPLETABLE_CMDS = {
+        "/agent": "agents",
+        "/skill": "skills",
+        "/load": "sessions",
+        "/model": "models",
+    }
+
+    @staticmethod
+    def _find_cmd_query(text, cursor, buf):
+        """Check if text starts with a completable command. Returns (cmd, start_pos, query) or None."""
+        for cmd, _ in LineEditor._COMPLETABLE_CMDS.items():
+            prefix = cmd + " "
+            if text.startswith(prefix):
+                # Query is everything after the command + space
+                arg_start = len(prefix)
+                # Find position in buf (may differ from text due to markers)
+                buf_pos = arg_start
+                query = text[arg_start:cursor]
+                return cmd, buf_pos, query
+        return None
+
+    def _command_completer(self, cmd, query):
+        """Complete command arguments."""
+        kind = self._COMPLETABLE_CMDS.get(cmd, "")
+        query_lower = query.lower()
+
+        if kind == "agents":
+            agents_dir = os.path.join(str(self.work_dir), "..", "agents")
+            # Try relative to app dir (agents/ next to src/)
+            for candidate in [
+                os.path.join(str(self.work_dir), "agents"),
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents"),
+            ]:
+                if os.path.isdir(candidate):
+                    agents_dir = candidate
+                    break
+            return self._list_md_names(agents_dir, query_lower)
+
+        if kind == "skills":
+            for candidate in [
+                os.path.join(str(self.work_dir), "skills"),
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills"),
+            ]:
+                if os.path.isdir(candidate):
+                    return self._list_md_names(candidate, query_lower)
+            return []
+
+        if kind == "sessions":
+            sessions_dir = os.path.join(str(self.work_dir), ".emelya", "sessions")
+            if os.path.isdir(sessions_dir):
+                names = sorted(os.listdir(sessions_dir))
+                if query_lower:
+                    names = [n for n in names if n.lower().startswith(query_lower)]
+                return names
+            return []
+
+        if kind == "models":
+            import json as _json
+            models_path = os.path.join(str(self.work_dir), ".emelya", "models.json")
+            names = ["local"]
+            try:
+                data = _json.loads(open(models_path).read())
+                names.extend(data.get("models", {}).keys())
+            except Exception:
+                pass
+            if query_lower:
+                names = [n for n in names if n.lower().startswith(query_lower)]
+            return names
+
+        return []
+
+    @staticmethod
+    def _list_md_names(directory, prefix=""):
+        """List .md file stems from directory, filtered by prefix."""
+        try:
+            names = sorted(
+                f[:-3] for f in os.listdir(directory)
+                if f.endswith(".md") and not f.startswith(".")
+            )
+            if prefix:
+                names = [n for n in names if n.lower().startswith(prefix)]
+            return names
+        except OSError:
+            return []
 
     @staticmethod
     def _find_at_query(buf, cursor):
