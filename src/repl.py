@@ -3,6 +3,8 @@
 import json
 import platform
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +19,51 @@ from sandbox import Sandbox
 from tools import ToolContext, ToolRegistry
 from tools.skill import scan_skills
 from tools.agent import scan_agents
+
+
+class _WaitSpinner:
+    """Animated spinner with timer, shown while waiting for LLM response."""
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _DELAY = 1.0  # seconds before spinner appears
+
+    def __init__(self, label: str):
+        self._label = label
+        self._running = False
+        self._thread = None
+        self._start_time = 0
+
+    def start(self):
+        self._running = True
+        self._start_time = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if not self._running:
+            return
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1)
+            self._thread = None
+        # Clear spinner line
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
+    def _run(self):
+        # Wait before showing spinner
+        deadline = self._start_time + self._DELAY
+        while self._running and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # Animate
+        frame_idx = 0
+        while self._running:
+            elapsed = time.monotonic() - self._start_time
+            frame = self._FRAMES[frame_idx % len(self._FRAMES)]
+            sys.stdout.write(f"\r\033[K  {frame} {self._label} [{elapsed:.0f}s]")
+            sys.stdout.flush()
+            frame_idx += 1
+            time.sleep(0.1)
 
 
 class REPL:
@@ -38,6 +85,7 @@ class REPL:
         self._models_path = config.work_dir / ".aigent" / "models.json"
         self._models = self._load_models()
         self.active_model = config.model_name or "local"
+        self._model_display = self.active_model  # updated from API response
         self.llm = self._create_llm_client()
 
         # Session management
@@ -129,14 +177,27 @@ class REPL:
             return
         prev = self.active_model
         self.active_model = name
+        self._model_display = name
         self.llm = self._create_llm_client()
         self.tool_ctx.llm_client = self.llm
         self.log.event(f"Model switched: {prev} -> {name} ({self.llm.base_url} / {self.llm.model})")
         ok, info = self.llm.check_connection()
         if ok:
-            print(f"  Switched to: {name} ({info})")
+            self._update_model_display(info)
+            print(f"  Switched to: {self._model_display} ({info})")
         else:
             print(f"  Switched to: {name} (warning: {info})")
+
+    def _update_model_display(self, info: str = ""):
+        """Extract short model name from connection info or API response."""
+        # From check_connection: "models: Qwen3.5-4B-Q5_K_M.gguf"
+        if info.startswith("models: "):
+            name = info[8:].split(",")[0].strip()
+            # Strip common suffixes for cleaner display
+            for suffix in (".gguf", ".bin"):
+                if name.endswith(suffix):
+                    name = name[:-len(suffix)]
+            self._model_display = name
 
     def _list_models(self):
         for name, cfg in self._models.items():
@@ -382,12 +443,16 @@ class REPL:
                 print(f"  {line}")
 
     def _llm_call(self, messages, tools):
-        """Single LLM call with streaming support. Returns response dict."""
+        """Single LLM call with streaming support and wait spinner."""
         url = f"{self.llm.base_url}/v1/chat/completions"
         self.log.request(url, messages, tools)
 
         tokens = self.context.estimate_tokens()
-        prefix = f"\nAigent({self.active_model}, {tokens} tok): "
+        label = f"Aigent ({self._model_display}, {tokens} tok)"
+
+        spinner = _WaitSpinner(label)
+        spinner.start()
+        t0 = time.monotonic()
 
         if self.config.stream:
             prefix_printed = False
@@ -395,32 +460,48 @@ class REPL:
             def _on_content(text):
                 nonlocal prefix_printed
                 if not prefix_printed:
+                    spinner.stop()
+                    elapsed = time.monotonic() - t0
+                    prefix = f"\nAigent ({self._model_display}, {tokens} tok, {elapsed:.1f}s): "
                     print(prefix, end="", flush=True)
                     prefix_printed = True
                 print(text, end="", flush=True)
 
-            response = self.llm.stream_chat(
-                messages=messages,
-                tools=tools,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                on_content=_on_content,
-            )
+            try:
+                response = self.llm.stream_chat(
+                    messages=messages,
+                    tools=tools,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    on_content=_on_content,
+                )
+            finally:
+                spinner.stop()
             if prefix_printed:
-                print()  # newline after streamed content
+                print()
         else:
-            response = self.llm.chat(
-                messages=messages,
-                tools=tools,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-            )
+            try:
+                response = self.llm.chat(
+                    messages=messages,
+                    tools=tools,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                )
+            finally:
+                spinner.stop()
+            elapsed = time.monotonic() - t0
             if response.get("content"):
+                prefix = f"\nAigent ({self._model_display}, {tokens} tok, {elapsed:.1f}s): "
                 print(f"{prefix}{response['content']}")
+
+        # Update display name from every API response
+        mid = response.get("model_id")
+        if mid and mid != self._model_display:
+            self._model_display = mid
 
         self.log.response(
             response.get("content"), response.get("tool_calls"),
-            usage=response.get("usage"), model=self.llm.model,
+            usage=response.get("usage"), model=mid or self.llm.model,
         )
         return response
 
@@ -556,7 +637,7 @@ class REPL:
                 if response.get("content"):
                     final_text = response["content"]
                     tokens = self.context.estimate_tokens()
-                    print(f"\nAigent({self.active_model}, {tokens} tok): {final_text}")
+                    print(f"\nAigent ({self._model_display}, {tokens} tok): {final_text}")
             except Exception as e:
                 print(f"\nError: {e}")
 
@@ -1121,11 +1202,12 @@ class REPL:
 
         # Check connection (non-fatal — user can switch model later)
         print(f"\nChecking {self.active_model}...")
-        ok, msg = self.llm.check_connection()
+        ok, info = self.llm.check_connection()
         if ok:
-            print(f"Connected ({msg})")
+            self._update_model_display(info)
+            print(f"Connected ({info})")
         else:
-            print(f"Warning: {msg}")
+            print(f"Warning: {info}")
             print(f"Use /model to switch to another model")
         print("\nCommands: /clear /compact /undo /drop /save /load /new /model /tools /mcp /stats /context /history /exit")
         print("-" * 50)
