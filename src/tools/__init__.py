@@ -24,6 +24,7 @@ class ToolContext:
     skills_dir: Path = None
     agents_dir: Path = None
     llm_client: object = None
+    session_log: object = None  # SessionLog for usage tracking
     tool_registry: object = None
     config: object = None
 

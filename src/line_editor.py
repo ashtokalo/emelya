@@ -549,9 +549,15 @@ class LineEditor:
         except Exception:
             return 80
 
+    @staticmethod
+    def _visible_len(s):
+        """Length excluding ANSI escape codes."""
+        import re
+        return len(re.sub(r"\033\[[0-9;]*[A-Za-z]", "", s))
+
     def _draw(self, prompt, buf, cursor):
         display = self._buf_to_display(buf)
-        prompt_len = len(prompt)
+        prompt_len = self._visible_len(prompt)
         full = prompt + display
         display_len = prompt_len + self._display_len(buf)
         width = self._get_term_width()

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from config import Config
+from theme import C
 from context import Context
 from input_history import InputHistory
 from line_editor import LineEditor, strip_markers
@@ -60,7 +61,7 @@ class _WaitSpinner:
         while self._running:
             elapsed = time.monotonic() - self._start_time
             frame = self._FRAMES[frame_idx % len(self._FRAMES)]
-            sys.stdout.write(f"\r\033[K  {frame} {self._label} [{elapsed:.0f}s]")
+            sys.stdout.write(f"\r\033[K  {C.spinner}{frame}{C.reset} {C.muted}{self._label} [{elapsed:.0f}s]{C.reset}")
             sys.stdout.flush()
             frame_idx += 1
             time.sleep(0.1)
@@ -101,6 +102,7 @@ class REPL:
             agents_dir=self.agents_dir,
             llm_client=self.llm,
             config=config,
+            session_log=self.log,
         )
 
         # Load tools
@@ -393,7 +395,7 @@ class REPL:
         if self.config.confirm_mode == "no_confirm":
             return True
         try:
-            answer = input("  Allow? (y/n): ").strip().lower()
+            answer = input(f"  {C.warning}Allow? (y/n):{C.reset} ").strip().lower()
             return answer in ("y", "yes")
         except (EOFError, KeyboardInterrupt):
             return False
@@ -405,42 +407,38 @@ class REPL:
         if name == "bash":
             desc = args.get("description", "")
             cmd = args.get("command", "")
-            print(f"\n  bash: {desc}")
-            print(f"  $ {cmd}")
+            print(f"\n  {C.tool_call}bash:{C.reset} {desc}")
+            print(f"  {C.muted}$ {cmd}{C.reset}")
         elif name == "read":
-            path = args.get("path", "")
-            print(f"\n  read: {path}")
+            print(f"\n  {C.tool_call}read:{C.reset} {args.get('path', '')}")
         elif name == "write":
-            path = args.get("path", "")
-            print(f"\n  write: {path}")
+            print(f"\n  {C.tool_call}write:{C.reset} {args.get('path', '')}")
         elif name == "edit":
-            path = args.get("path", "")
-            print(f"\n  edit: {path}")
+            print(f"\n  {C.tool_call}edit:{C.reset} {args.get('path', '')}")
         elif name == "glob":
-            pattern = args.get("pattern", "")
-            print(f"\n  glob: {pattern}")
+            print(f"\n  {C.tool_call}glob:{C.reset} {args.get('pattern', '')}")
         elif name == "grep":
             pattern = args.get("pattern", "")
             include = args.get("include", "")
             extra = f" ({include})" if include else ""
-            print(f"\n  grep: {pattern}{extra}")
+            print(f"\n  {C.tool_call}grep:{C.reset} {pattern}{extra}")
         elif name == "skill":
-            print(f"\n  skill: {args.get('name', '')}")
+            print(f"\n  {C.tool_call}skill:{C.reset} {args.get('name', '')}")
         elif name == "agent":
-            print(f"\n  agent: {args.get('name', '')}")
+            print(f"\n  {C.tool_call}agent:{C.reset} {args.get('name', '')}")
         else:
-            print(f"\n  {name}: {json.dumps(args, ensure_ascii=False)}")
+            print(f"\n  {C.tool_call}{name}:{C.reset} {json.dumps(args, ensure_ascii=False)}")
 
     def _print_tool_result(self, name: str, result: str):
         """Display tool result (abbreviated)."""
+        is_error = result.startswith("Error:")
+        color = C.tool_error if is_error else C.tool_result
         lines = result.split("\n")
+        show = lines[:10] if len(lines) > 15 else lines
+        for line in show:
+            print(f"  {color}{line}{C.reset}")
         if len(lines) > 15:
-            preview = "\n".join(lines[:10])
-            print(f"  {preview}")
-            print(f"  ... ({len(lines)} lines total)")
-        else:
-            for line in lines:
-                print(f"  {line}")
+            print(f"  {C.muted}... ({len(lines)} lines total){C.reset}")
 
     def _llm_call(self, messages, tools):
         """Single LLM call with streaming support and wait spinner."""
@@ -449,6 +447,7 @@ class REPL:
 
         tokens = self.context.estimate_tokens()
         label = f"Aigent ({self._model_display}, {tokens} tok)"
+        colored_prefix_tpl = f"\n{C.agent_prefix}Aigent{C.reset} ({C.muted}{self._model_display}, {{tok}} tok, {{elapsed:.1f}}s{C.reset}): "
 
         spinner = _WaitSpinner(label)
         spinner.start()
@@ -462,7 +461,7 @@ class REPL:
                 if not prefix_printed:
                     spinner.stop()
                     elapsed = time.monotonic() - t0
-                    prefix = f"\nAigent ({self._model_display}, {tokens} tok, {elapsed:.1f}s): "
+                    prefix = colored_prefix_tpl.format(tok=tokens, elapsed=elapsed)
                     print(prefix, end="", flush=True)
                     prefix_printed = True
                 print(text, end="", flush=True)
@@ -491,7 +490,7 @@ class REPL:
                 spinner.stop()
             elapsed = time.monotonic() - t0
             if response.get("content"):
-                prefix = f"\nAigent ({self._model_display}, {tokens} tok, {elapsed:.1f}s): "
+                prefix = colored_prefix_tpl.format(tok=tokens, elapsed=elapsed)
                 print(f"{prefix}{response['content']}")
 
         # Update display name from every API response
@@ -642,7 +641,7 @@ class REPL:
                 if response.get("content"):
                     final_text = response["content"]
                     tokens = self.context.estimate_tokens()
-                    print(f"\nAigent ({self._model_display}, {tokens} tok): {final_text}")
+                    print(f"\n{C.agent_prefix}Aigent{C.reset} ({C.muted}{self._model_display}, {tokens} tok{C.reset}): {final_text}")
             except Exception as e:
                 print(f"\nError: {e}")
 
@@ -1240,7 +1239,7 @@ class REPL:
         while True:
             try:
                 print()  # blank line before prompt
-                user_input = editor.read(prompt="You: ", history=self.input_history)
+                user_input = editor.read(prompt=f"{C.user_prompt}You:{C.reset} ", history=self.input_history)
             except (EOFError, KeyboardInterrupt):
                 print("\n\nBye!")
                 break
