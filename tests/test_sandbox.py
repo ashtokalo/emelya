@@ -56,8 +56,13 @@ class TestSandbox(unittest.TestCase):
         self.assertEqual(hint, "src/tools/read.py")
 
     def test_suggest_path_no_match(self):
-        hint = self.sandbox.suggest_path("totally/wrong/path.py")
+        hint = self.sandbox.suggest_path("totally/wrong/zzz_nonexistent.py")
         self.assertEqual(hint, "")
+
+    def test_suggest_path_rglob(self):
+        # app/controllers/read.py → should find src/tools/read.py via rglob
+        hint = self.sandbox.suggest_path("app/controllers/read.py")
+        self.assertIn("src/tools/read.py", hint)
 
 
 if __name__ == "__main__":
