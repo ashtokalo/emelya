@@ -704,11 +704,30 @@ class REPL:
         work_messages.append(response["raw"])
         final_text = response.get("content") or ""
         consecutive_errors = 0
+        _seen_calls = {}  # (name, args_key) -> count — duplicate detection
 
         for iteration in range(self.config.max_iterations):
             # Execute tool calls
             for tc in tool_calls:
                 self._print_tool_call(tc)
+
+                # Duplicate tool call detection
+                _call_key = (tc["name"], json.dumps(tc["args"], sort_keys=True))
+                _seen_calls[_call_key] = _seen_calls.get(_call_key, 0) + 1
+                if _seen_calls[_call_key] > 1:
+                    result = (
+                        f"Error: you already called {tc['name']} with the same arguments. "
+                        "Use a different approach or provide your answer."
+                    )
+                    self.log.tool_exec(tc["name"], tc["args"], result, 0)
+                    self._print_tool_result(tc["name"], result)
+                    work_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result,
+                    })
+                    consecutive_errors += 1
+                    continue
 
                 import time as _time
                 t0 = _time.monotonic()
@@ -772,7 +791,11 @@ class REPL:
                 work_messages.append({"role": "user", "content": nudge})
 
             # Next LLM call in work context (refresh tools — load_tools may have added new ones)
-            tools = self.registry.get_tools(compact=self._use_compact_tools)
+            if remaining == 0:
+                # Last step — force text-only response (no tools)
+                tools = None
+            else:
+                tools = self.registry.get_tools(compact=self._use_compact_tools)
             try:
                 response = self._llm_call(work_messages, tools)
             except LLMError as e:

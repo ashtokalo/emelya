@@ -42,14 +42,36 @@ class Sandbox:
         )
 
     def suggest_path(self, path: str) -> str:
-        """If file not found, try to suggest a similar existing path."""
+        """If file not found, try to suggest a similar existing path.
+
+        Strategy:
+        1. Try removing each directory level: src/aigent/repl.py → src/repl.py
+        2. Glob for **/{filename} — finds file anywhere in project
+        """
         from pathlib import PurePosixPath
         parts = PurePosixPath(path).parts
-        # Try removing each directory level: src/emelya/repl.py → src/repl.py
-        for i in range(len(parts) - 1):
-            for skip in range(len(parts) - 1):
-                candidate_parts = parts[:skip] + parts[skip + 1:]
-                candidate = str(Path(*candidate_parts)) if candidate_parts else ""
-                if candidate and (self.work_dir / candidate).exists():
-                    return candidate
+        # Try removing each directory level
+        for skip in range(len(parts) - 1):
+            candidate_parts = parts[:skip] + parts[skip + 1:]
+            candidate = str(Path(*candidate_parts)) if candidate_parts else ""
+            if candidate and (self.work_dir / candidate).exists():
+                return candidate
+
+        # Glob for filename anywhere in the project
+        filename = parts[-1] if parts else ""
+        if filename:
+            matches = []
+            for found in self.work_dir.rglob(filename):
+                # Skip hidden dirs and common junk
+                rel = str(found.relative_to(self.work_dir))
+                skip_prefixes = (".git/", "node_modules/", "__pycache__/", ".venv/")
+                if any(rel.startswith(p) or f"/{p}" in rel for p in skip_prefixes):
+                    continue
+                matches.append(rel)
+                if len(matches) >= 5:
+                    break
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                return ", ".join(matches[:3])
         return ""

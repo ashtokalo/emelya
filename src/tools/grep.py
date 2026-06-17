@@ -89,6 +89,11 @@ def execute(args: dict, ctx) -> str:
 
     if "path" in args and args["path"]:
         base = ctx.sandbox.validate(args["path"])
+        if not base.exists():
+            hint = ctx.sandbox.suggest_path(args["path"])
+            if hint:
+                return f"Error: path not found: {args['path']}. Did you mean: {hint}?"
+            return f"Error: path not found: {args['path']}"
     else:
         base = ctx.work_dir
 

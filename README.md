@@ -119,7 +119,7 @@ LiteLLM supports 100+ providers and exposes a standard OpenAI-compatible API.
 | `read` | Read text files with line numbers |
 | `write` | Create or overwrite files (requires read first) |
 | `edit` | Find-and-replace by exact string match (max 30 lines per edit) |
-| `bash` | Execute shell commands with confirmation |
+| `bash` | Execute shell commands (read-only auto-approved) |
 | `glob` | Find files by name pattern |
 | `grep` | Search file contents with regex |
 | `list_dir` | List directory with file sizes |

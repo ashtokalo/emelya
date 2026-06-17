@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-06-17
+
+### Added
+- **Native tool-call format fallback** — detects and parses native formats that leak through instead of OpenAI function calling: DeepSeek DSML, Qwen/Hermes `<tool_call>`, Llama 3.1+ `<|python_tag|>` (both `call()` and JSON), Mistral `[TOOL_CALLS]`. Parsed tool names validated against available tools to prevent false positives
+- **Duplicate tool call detection** — repeated calls with identical arguments return an error instead of re-executing; works in main loop and sub-agents
+- **Forced last step** — `tools=None` on the final iteration so models physically cannot ignore the LAST STEP nudge
+- **Smart path suggestions** — `suggest_path()` now uses `rglob` to find files anywhere in the project; grep tool also suggests on path-not-found
+- **Auto-strip `cd <work_dir>`** — redundant `cd /path && ` prefix is silently removed from bash commands
+- **Auto-approve read-only bash commands** — extensive whitelist of safe commands (git/hg/svn read-only, ls, cat, grep, find, diff, jq, xxd, base64, man, linters for PHP/Python/JS/Go/Rust/C/C++/Ada/Ruby/Shell, version checks) — no confirmation prompt even in `--confirm all` mode
+
 ## [0.3.0] - 2026-06-14
 
 ### Added

@@ -146,6 +146,217 @@ class LLMClient:
         raise json.JSONDecodeError(f"Cannot parse tool arguments", raw, 0)
 
     @staticmethod
+    def _parse_native_tool_calls(content: str) -> list:
+        """Parse native tool-call formats that leak through instead of
+        proper OpenAI function calling.
+
+        Supported formats:
+          - DeepSeek DSML: <｜｜DSML｜｜invoke name="...">
+          - Qwen/Hermes: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+          - Mistral: [TOOL_CALLS] [{"name":"...","arguments":{...}}]
+          - Llama 3.1+: <|python_tag|>tool.call(arg="val") or {"name":"...","parameters":{...}}
+
+        Returns list of tool call dicts or empty list.
+        """
+        import re
+
+        # --- DeepSeek DSML ---
+        if "DSML" in content:
+            results = []
+            invoke_re = re.compile(
+                r'invoke\s+name="([^"]+)"[^>]*>(.*?)(?:</[^>]*invoke>|$)',
+                re.DOTALL,
+            )
+            param_re = re.compile(
+                r'parameter\s+name="([^"]+)"[^>]*>([^<]*)',
+            )
+            for m in invoke_re.finditer(content):
+                tool_name = m.group(1)
+                body = m.group(2)
+                args = {}
+                for pm in param_re.finditer(body):
+                    key = pm.group(1)
+                    value = pm.group(2).strip()
+                    if value.isdigit():
+                        args[key] = int(value)
+                    elif value.lower() in ("true", "false"):
+                        args[key] = value.lower() == "true"
+                    else:
+                        args[key] = value
+                if tool_name:
+                    results.append({
+                        "id": f"dsml_{tool_name}_{len(results)}",
+                        "name": tool_name,
+                        "args": args,
+                    })
+            if results:
+                return results
+
+        # --- Qwen / Hermes: <tool_call>{"name":...}</tool_call> ---
+        if "<tool_call>" in content:
+            results = []
+            # Match JSON blocks between <tool_call> tags (or unclosed at end)
+            tc_re = re.compile(
+                r'<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|$)',
+                re.DOTALL,
+            )
+            for m in tc_re.finditer(content):
+                try:
+                    obj = json.loads(m.group(1))
+                    name = obj.get("name") or obj.get("function", "")
+                    args = obj.get("arguments") or obj.get("parameters") or {}
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                    if name:
+                        results.append({
+                            "id": f"qwen_{name}_{len(results)}",
+                            "name": name,
+                            "args": args,
+                        })
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if results:
+                return results
+
+        # --- Llama 3.1+: <|python_tag|> or raw JSON tool calls ---
+        if "<|python_tag|>" in content:
+            results = []
+            tag = "<|python_tag|>"
+            idx = content.find(tag)
+            body = content[idx + len(tag):].strip()
+            # Format 1: tool_name.call(key="val", key2=val2)
+            call_re = re.compile(
+                r'(\w+)\.call\(([^)]*)\)',
+            )
+            for m in call_re.finditer(body):
+                tool_name = m.group(1)
+                args_str = m.group(2).strip()
+                args = {}
+                if args_str:
+                    # Parse key=value pairs: key="val", key2=123, key3=True
+                    kv_re = re.compile(r'(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|[^,]+)')
+                    for kv in kv_re.finditer(args_str):
+                        key = kv.group(1)
+                        val = kv.group(2).strip()
+                        if val.startswith('"') and val.endswith('"'):
+                            val = val[1:-1].replace('\\"', '"')
+                            args[key] = val
+                        elif val.isdigit():
+                            args[key] = int(val)
+                        elif val.lower() in ("true", "false"):
+                            args[key] = val.lower() == "true"
+                        else:
+                            args[key] = val
+                if tool_name:
+                    results.append({
+                        "id": f"llama_{tool_name}_{len(results)}",
+                        "name": tool_name,
+                        "args": args,
+                    })
+            # Format 2: JSON object(s) after the tag
+            if not results:
+                # Try parsing each line as JSON (one call per line)
+                candidates = body.strip().splitlines()
+                for candidate in candidates:
+                    candidate = candidate.strip()
+                    if not candidate.startswith("{"):
+                        continue
+                    try:
+                        obj = json.loads(candidate)
+                        name = obj.get("name", "")
+                        args = obj.get("parameters") or obj.get("arguments") or {}
+                        if isinstance(args, str):
+                            args = json.loads(args)
+                        if name:
+                            results.append({
+                                "id": f"llama_{name}_{len(results)}",
+                                "name": name,
+                                "args": args,
+                            })
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            if results:
+                return results
+
+        # --- Mistral: [TOOL_CALLS] [{...}, ...] ---
+        if "[TOOL_CALLS]" in content:
+            marker = content.find("[TOOL_CALLS]")
+            rest = content[marker + len("[TOOL_CALLS]"):].strip()
+            # Find the JSON array
+            try:
+                calls = json.loads(rest) if rest.startswith("[") else None
+            except json.JSONDecodeError:
+                # Try to find array boundaries
+                bracket_start = rest.find("[")
+                if bracket_start >= 0:
+                    try:
+                        calls = json.loads(rest[bracket_start:])
+                    except json.JSONDecodeError:
+                        calls = None
+                else:
+                    calls = None
+            if calls and isinstance(calls, list):
+                results = []
+                for obj in calls:
+                    name = obj.get("name", "")
+                    args = obj.get("arguments") or obj.get("parameters") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, ValueError):
+                            args = {}
+                    if name:
+                        results.append({
+                            "id": f"mistral_{name}_{len(results)}",
+                            "name": name,
+                            "args": args,
+                        })
+                if results:
+                    return results
+
+        return []
+
+    @staticmethod
+    def _validate_native_calls(calls: list, tools: list) -> list:
+        """Filter parsed native tool calls — keep only those whose name
+        matches an actually available tool.  Returns empty list if none match,
+        which prevents false positives when models mention format markers in text."""
+        if not calls:
+            return []
+        tool_names = set()
+        for t in tools:
+            name = t.get("function", {}).get("name", "")
+            if name:
+                tool_names.add(name)
+        valid = [c for c in calls if c["name"] in tool_names]
+        return valid
+
+    @staticmethod
+    def _strip_native_markers(content: str) -> str:
+        """Strip native tool-call markers from content, keep text before them."""
+        import re
+        # Remove everything from the first marker to end
+        # For DSML, the tag starts with '<' before the Unicode chars
+        for marker in ("<tool_call>", "[TOOL_CALLS]", "<|python_tag|>"):
+            idx = content.find(marker)
+            if idx >= 0:
+                content = content[:idx].strip()
+                break
+        else:
+            # DSML: find the '<' that starts the DSML tag block
+            idx = content.find("DSML")
+            if idx >= 0:
+                # Walk back to find the opening '<'
+                start = content.rfind("<", 0, idx)
+                if start >= 0:
+                    content = content[:start].strip()
+                else:
+                    content = content[:idx].strip()
+        # Clean up any remaining closing tags
+        content = re.sub(r'</tool_call>', '', content).strip()
+        return content or None
+
+    @staticmethod
     def _parse_tool_calls(raw_calls: list) -> list:
         """Parse tool_calls from API response into clean dicts."""
         result = []
@@ -189,9 +400,34 @@ class LLMClient:
                 resp = self._post_json(url, data)
                 msg = resp["choices"][0]["message"]
                 usage = resp.get("usage")
+                content = msg.get("content")
+                tool_calls = self._parse_tool_calls(msg["tool_calls"]) if msg.get("tool_calls") else None
+
+                # Native format fallback: some models output tool calls
+                # in their native format instead of OpenAI function calling
+                if not tool_calls and content and tools:
+                    native_calls = self._validate_native_calls(
+                        self._parse_native_tool_calls(content), tools,
+                    )
+                    if native_calls:
+                        tool_calls = native_calls
+                        content = self._strip_native_markers(content)
+                        msg = {"role": "assistant", "content": content}
+                        msg["tool_calls"] = [
+                            {
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tc["name"],
+                                    "arguments": json.dumps(tc["args"]),
+                                },
+                            }
+                            for tc in tool_calls
+                        ]
+
                 return {
-                    "content": msg.get("content"),
-                    "tool_calls": self._parse_tool_calls(msg["tool_calls"]) if msg.get("tool_calls") else None,
+                    "content": content,
+                    "tool_calls": tool_calls,
                     "raw": msg,
                     "usage": usage,
                     "model_id": resp.get("model"),
@@ -300,6 +536,15 @@ class LLMClient:
                             "args": args,
                         })
                     parsed_tc = finalized
+
+                # Native format fallback for streaming
+                if not parsed_tc and content and tools:
+                    native_calls = self._validate_native_calls(
+                        self._parse_native_tool_calls(content), tools,
+                    )
+                    if native_calls:
+                        parsed_tc = native_calls
+                        content = self._strip_native_markers(content)
 
                 raw = {"role": "assistant", "content": content or None}
                 if parsed_tc:

@@ -210,16 +210,21 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
             pass
 
     action_log = []  # track what agent did for error reporting
+    _seen_calls = {}  # duplicate detection
 
     for step in range(max_steps):
         t0 = time.monotonic()
         sys.stdout.write(f"\r\033[K{indent}{_C.muted}  [{agent_name}] step {step + 1}/{max_steps}...{_C.reset}")
         sys.stdout.flush()
 
+        # Last step — force text-only (no tools) so model can't ignore nudge
+        remaining = max_steps - step - 1
+        step_tools = None if remaining == 0 else (tools if tools else None)
+
         try:
             response = llm_client.chat(
                 messages=messages,
-                tools=tools if tools else None,
+                tools=step_tools,
                 temperature=ctx.config.temperature if ctx.config else 0.7,
                 max_tokens=ctx.config.max_tokens if ctx.config else 1024,
             )
@@ -277,6 +282,22 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
             else:
                 detail = str(tc_args)[:80] if tc_args else ""
                 print(f"{indent}  {_C.tool_call}{tc_name}{_C.reset} {_C.muted}{detail}{_C.reset}")
+
+            # Duplicate detection
+            _call_key = (tc_name, json.dumps(tc_args, sort_keys=True))
+            _seen_calls[_call_key] = _seen_calls.get(_call_key, 0) + 1
+            if _seen_calls[_call_key] > 1:
+                result = (
+                    f"Error: duplicate call to {tc_name} with same arguments. "
+                    "Try a different approach."
+                )
+                action_log.append(f"{tc_name}(DUPLICATE)")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
+                continue
 
             # Execute and track
             result = ctx.tool_registry.execute(tc_name, tc_args, sub_ctx)
