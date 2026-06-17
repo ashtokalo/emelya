@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
 - **Smart path suggestions** — `suggest_path()` now uses `rglob` to find files anywhere in the project; grep tool also suggests on path-not-found
 - **Auto-strip `cd <work_dir>`** — redundant `cd /path && ` prefix is silently removed from bash commands
 - **Auto-approve read-only bash commands** — extensive whitelist of safe commands (git/hg/svn read-only, ls, cat, grep, find, diff, jq, xxd, base64, man, linters for PHP/Python/JS/Go/Rust/C/C++/Ada/Ruby/Shell, version checks) — no confirmation prompt even in `--confirm all` mode
+- **Bash output limit with cache** — `max_output` parameter (default 8192 chars, max 512K); truncated output is cached so re-running with larger limit doesn't re-execute the command
+- **Display truncation** — tool results in terminal limited by lines (10), chars per line (200), and total chars (2000) to prevent screen flooding from grep/curl output
+- **REPL decomposition** — `repl.py` split into `models.py` (288 lines), `mcp_manager.py` (302 lines), `commands.py` (390 lines) via mixin pattern; `repl.py` reduced from 1674 to 749 lines
 
 ## [0.3.0] - 2026-06-14
 

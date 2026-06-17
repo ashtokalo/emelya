@@ -26,11 +26,18 @@ DEFINITION = {
                     "type": "integer",
                     "description": "Timeout in seconds (default: 30, max: 300)",
                 },
+                "max_output": {
+                    "type": "integer",
+                    "description": "Max output chars (default: 8192). Increase if output was truncated.",
+                },
             },
             "required": ["command"],
         },
     },
 }
+
+# Cache for truncated command outputs: command → full_output
+_output_cache = {}
 
 # Commands considered read-only (auto-approved even in confirm_all mode)
 READONLY_COMMANDS = {
@@ -97,7 +104,8 @@ READONLY_COMMANDS = {
     "op list", "op inspect", "op search",
 }
 
-MAX_OUTPUT = 10000
+DEFAULT_MAX_OUTPUT = 8192
+HARD_MAX_OUTPUT = 512000  # absolute ceiling to prevent context blowup
 
 
 def _strip_cd_prefix(command: str, work_dir: str) -> str:
@@ -143,12 +151,19 @@ def execute(args: dict, ctx) -> str:
     command = args.get("command", "")
     description = args.get("description", command)
     timeout = min(args.get("timeout", 30), 300)
+    max_output = min(args.get("max_output", DEFAULT_MAX_OUTPUT), HARD_MAX_OUTPUT)
 
     if not command.strip():
         return "Error: empty command"
 
     # Strip redundant cd to work_dir
     command = _strip_cd_prefix(command, str(ctx.work_dir))
+
+    # Check cache — if same command was run before and truncated,
+    # serve from cache with the new max_output limit
+    if command in _output_cache:
+        cached_output, cached_rc = _output_cache[command]
+        return _format_output(cached_output, cached_rc, max_output)
 
     confirm_mode = getattr(ctx.config, "confirm_mode", "confirm_all") if ctx.config else "confirm_all"
 
@@ -171,15 +186,34 @@ def execute(args: dict, ctx) -> str:
 
         output = output.strip()
 
-        if len(output) > MAX_OUTPUT:
-            output = output[:MAX_OUTPUT] + "\n[truncated]"
+        # Cache if output exceeds requested limit (may be re-requested with larger limit)
+        if len(output) > max_output:
+            # Keep up to HARD_MAX_OUTPUT in cache
+            _output_cache[command] = (output[:HARD_MAX_OUTPUT], result.returncode)
 
-        if result.returncode != 0:
-            return f"Exit code {result.returncode}\n{output}" if output else f"Exit code {result.returncode}"
-
-        return output if output else "(no output)"
+        return _format_output(output, result.returncode, max_output)
 
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {timeout}s"
     except Exception as e:
         return f"Error: {e}"
+
+
+def _format_output(output: str, returncode: int, max_output: int) -> str:
+    """Format command output with truncation."""
+    if not output:
+        prefix = f"Exit code {returncode}\n" if returncode != 0 else ""
+        return f"{prefix}(no output)" if not prefix else prefix.strip()
+
+    total_len = len(output)
+    if total_len > max_output:
+        output = output[:max_output]
+        output += (
+            f"\n[truncated: showing {max_output} of {total_len} chars. "
+            f"Use max_output={min(total_len, HARD_MAX_OUTPUT)} to see more]"
+        )
+
+    if returncode != 0:
+        return f"Exit code {returncode}\n{output}"
+
+    return output

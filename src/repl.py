@@ -257,30 +257,27 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             print(f"\n  {C.tool_call}{name}:{C.reset} {json.dumps(args, ensure_ascii=False)}")
 
     def _print_tool_result(self, name: str, result: str):
-        """Display tool result (abbreviated). Limits both lines and chars."""
+        """Display tool result (abbreviated). Limits lines, chars per line, and total chars."""
         is_error = result.startswith("Error:")
         color = C.tool_error if is_error else C.tool_result
-        max_chars = 500
-        max_lines = 10
+        max_total = 2000   # max total chars to display
+        max_lines = 10     # max lines to display
+        max_line_len = 200 # max chars per line
         lines = result.split("\n")
-        truncated = False
+        shown_chars = 0
+        shown_lines = 0
 
-        # Check total length — for long single-line results (JSON from MCP)
-        if len(result) > max_chars and len(lines) <= 2:
-            preview = result[:max_chars]
-            print(f"  {color}{preview}{C.reset}")
-            print(f"  {C.muted}... ({len(result)} chars total){C.reset}")
-            return
-
-        if len(lines) > max_lines:
-            show = lines[:max_lines]
-            truncated = True
-        else:
-            show = lines
-        for line in show:
+        for line in lines:
+            if shown_lines >= max_lines or shown_chars >= max_total:
+                break
+            if len(line) > max_line_len:
+                line = line[:max_line_len] + "…"
             print(f"  {color}{line}{C.reset}")
-        if truncated:
-            print(f"  {C.muted}... ({len(lines)} lines total){C.reset}")
+            shown_chars += len(line)
+            shown_lines += 1
+
+        if shown_lines < len(lines) or shown_chars < len(result):
+            print(f"  {C.muted}... ({len(lines)} lines, {len(result)} chars total){C.reset}")
 
     def _llm_call(self, messages, tools, operation="default"):
         """Single LLM call with streaming, spinner, and routing support."""
