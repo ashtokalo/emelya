@@ -13,7 +13,8 @@ All notable changes to this project will be documented in this file.
 - **Auto-approve read-only bash commands** — extensive whitelist of safe commands (git/hg/svn read-only, ls, cat, grep, find, diff, jq, xxd, base64, man, linters for PHP/Python/JS/Go/Rust/C/C++/Ada/Ruby/Shell, version checks) — no confirmation prompt even in `--confirm all` mode
 - **Bash output limit with cache** — `max_output` parameter (default 8192 chars, max 512K); truncated output is cached so re-running with larger limit doesn't re-execute the command
 - **Display truncation** — tool results in terminal limited by lines (10), chars per line (200), and total chars (2000) to prevent screen flooding from grep/curl output
-- **REPL decomposition** — `repl.py` split into `models.py` (288 lines), `mcp_manager.py` (302 lines), `commands.py` (390 lines) via mixin pattern; `repl.py` reduced from 1674 to 749 lines
+- **Direct MCP interaction** — `/mcp tools <name>` lists tools with descriptions and parameters; `/mcp call <name> <tool> [args]` executes tools without the model. Args can be JSON or plain text (auto-mapped to first parameter). JSON responses pretty-printed (≤100 lines) or compact. Tab completion for server names and tool names
+- **REPL decomposition** — `repl.py` split into `models.py`, `mcp_manager.py`, `commands.py` via mixin pattern; `repl.py` reduced from 1674 to 749 lines
 
 ## [0.3.0] - 2026-06-14
 

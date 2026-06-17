@@ -487,20 +487,30 @@ class LineEditor:
         "/skill": "skills",
         "/load": "sessions",
         "/model": "models",
+        "/mcp": "mcp",
     }
 
     @staticmethod
     def _find_cmd_query(text, cursor, buf):
-        """Check if text starts with a completable command. Returns (cmd, start_pos, query) or None."""
-        for cmd, _ in LineEditor._COMPLETABLE_CMDS.items():
+        """Check if text starts with a completable command.
+        Returns (cmd, start_pos, query) or None.
+        start_pos points to the start of the last word being completed.
+        query is the full argument string (for multi-level completers)."""
+        for cmd, kind in LineEditor._COMPLETABLE_CMDS.items():
             prefix = cmd + " "
             if text.startswith(prefix):
-                # Query is everything after the command + space
-                arg_start = len(prefix)
-                # Find position in buf (may differ from text due to markers)
-                buf_pos = arg_start
-                query = text[arg_start:cursor]
-                return cmd, buf_pos, query
+                full_query = text[len(prefix):cursor]
+                # For multi-level commands (/mcp), replace only the last word
+                if kind == "mcp":
+                    # Find start of last word
+                    last_space = text.rfind(" ", len(prefix), cursor)
+                    if last_space >= 0:
+                        start_pos = last_space + 1
+                    else:
+                        start_pos = len(prefix)
+                else:
+                    start_pos = len(prefix)
+                return cmd, start_pos, full_query
         return None
 
     def _command_completer(self, cmd, query):
@@ -541,17 +551,82 @@ class LineEditor:
         if kind == "models":
             import json as _json
             models_path = os.path.join(str(self.work_dir), ".emelya", "models.json")
-            names = ["local"]
+            names = ["local", "auto"]
             try:
                 data = _json.loads(open(models_path).read())
                 names.extend(data.get("models", {}).keys())
             except Exception:
                 pass
+            # Also complete subcommands: add, remove
+            names.extend(["add", "remove"])
             if query_lower:
                 names = [n for n in names if n.lower().startswith(query_lower)]
             return names
 
+        if kind == "mcp":
+            return self._complete_mcp(query, query_lower)
+
         return []
+
+    def _complete_mcp(self, query, query_lower):
+        """Multi-level completion for /mcp subcommands.
+        /mcp <TAB>            → add, remove, refresh, tools, call
+        /mcp tools <TAB>      → server names
+        /mcp call <TAB>       → server names
+        /mcp call <name> <TAB> → tool names for that server
+        /mcp remove <TAB>     → server names
+        /mcp refresh <TAB>    → server names
+        """
+        parts = query.split()
+        # No subcommand yet — complete subcommand
+        if not parts or (len(parts) == 1 and not query.endswith(" ")):
+            subcmds = ["add", "remove", "refresh", "tools", "call"]
+            prefix = parts[0].lower() if parts else ""
+            return [s for s in subcmds if s.startswith(prefix)]
+
+        subcmd = parts[0].lower()
+        server_names = self._list_mcp_servers()
+
+        # /mcp tools|call|remove|refresh <TAB> → server names
+        if subcmd in ("tools", "call", "remove", "refresh"):
+            if len(parts) == 1 and query.endswith(" "):
+                # No server name typed yet
+                return server_names
+            if len(parts) == 2 and not query.endswith(" "):
+                # Partial server name
+                prefix = parts[1].lower()
+                return [n for n in server_names if n.lower().startswith(prefix)]
+            # /mcp call <name> <TAB> → tool names
+            if subcmd == "call" and len(parts) >= 2:
+                srv_name = parts[1]
+                tool_names = self._list_mcp_tools(srv_name)
+                if len(parts) == 2 and query.endswith(" "):
+                    return tool_names
+                if len(parts) == 3 and not query.endswith(" "):
+                    prefix = parts[2].lower()
+                    return [t for t in tool_names if t.lower().startswith(prefix)]
+
+        return []
+
+    def _list_mcp_servers(self):
+        """List configured MCP server names from mcp.json."""
+        import json as _json
+        config_path = os.path.join(str(self.work_dir), ".emelya", "mcp.json")
+        try:
+            data = _json.loads(open(config_path).read())
+            return sorted(data.get("servers", {}).keys())
+        except Exception:
+            return []
+
+    def _list_mcp_tools(self, server_name):
+        """List cached tool names for an MCP server."""
+        import json as _json
+        cache_path = os.path.join(str(self.work_dir), ".emelya", "mcp_cache", f"{server_name}.json")
+        try:
+            tools = _json.loads(open(cache_path).read())
+            return sorted(t.get("name", "") for t in tools if t.get("name"))
+        except Exception:
+            return []
 
     @staticmethod
     def _list_md_names(directory, prefix=""):

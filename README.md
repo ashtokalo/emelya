@@ -199,6 +199,8 @@ Instructions loaded into context on demand. Model decides when to load them.
 | `/mcp add <name> <cmd>` | Add MCP server |
 | `/mcp remove <name>` | Remove MCP server |
 | `/mcp refresh [name]` | Reconnect and update cache |
+| `/mcp tools <name>` | List server tools with parameters |
+| `/mcp call <name> <tool> [args]` | Call MCP tool directly (JSON or plain text) |
 | `/context` | Show context size |
 | `/history` | Dump full context |
 | `/exit` | Exit |

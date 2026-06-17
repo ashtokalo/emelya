@@ -135,11 +135,15 @@ class MCPMixin:
             self._mcp_remove(subarg)
         elif subcmd in ("restart", "refresh"):
             self._mcp_restart(subarg)
+        elif subcmd == "tools":
+            self._mcp_tools(subarg)
+        elif subcmd == "call":
+            self._mcp_call(subarg)
         elif subcmd == "":
             self._mcp_status()
         else:
             print(f"  {t('unknown_subcmd')}: /mcp {subcmd}")
-            print("  Usage: /mcp, /mcp add, /mcp remove <name>, /mcp refresh [name]")
+            print("  Usage: /mcp, /mcp add, /mcp remove <name>, /mcp refresh [name], /mcp tools <name>, /mcp call <name> <tool> [json]")
 
     def _mcp_status(self):
         config_path = self.config.work_dir / ".emelya" / "mcp.json"
@@ -300,3 +304,140 @@ class MCPMixin:
                 print(f"  {n}: failed — {e}")
 
         self._update_dynamic_descriptions()
+
+    def _mcp_tools(self, name: str = ""):
+        """List tools for an MCP server with descriptions and parameters."""
+        if not name:
+            print("  Usage: /mcp tools <server_name>")
+            # List available servers
+            servers = list(getattr(self, "_mcp_config", {}).keys())
+            if servers:
+                print(f"  Servers: {', '.join(servers)}")
+            return
+
+        # Try cached tools first, then live
+        category = f"mcp:{name}"
+        ext_tools = self.registry._extensions.get(category, {})
+        if not ext_tools:
+            print(f"  No tools found for '{name}'. Is the server configured?")
+            return
+
+        print(f"\n  === MCP {name}: {len(ext_tools)} tools ===\n")
+        for tool_name, tool_info in sorted(ext_tools.items()):
+            defn = tool_info.get("definition", {}).get("function", {})
+            desc = defn.get("description", "")
+            params = defn.get("parameters", {}).get("properties", {})
+            required = set(defn.get("parameters", {}).get("required", []))
+
+            # Tool name and description
+            print(f"  {C.tool_call}{tool_name}{C.reset}")
+            if desc:
+                if len(desc) > 120:
+                    desc = desc[:120] + "…"
+                print(f"    {C.muted}{desc}{C.reset}")
+
+            # Parameters
+            if params:
+                for pname, pinfo in params.items():
+                    ptype = pinfo.get("type", "")
+                    pdesc = pinfo.get("description", "")
+                    req = " *" if pname in required else ""
+                    if pdesc and len(pdesc) > 80:
+                        pdesc = pdesc[:80] + "…"
+                    print(f"    {pname}{req} ({ptype}){f' — {pdesc}' if pdesc else ''}")
+            print()
+
+    def _mcp_call(self, arg: str = ""):
+        """Call an MCP tool directly without the model.
+
+        Args can be:
+          - JSON object: /mcp call srv tool {"key": "value"}
+          - Plain text:  /mcp call srv tool some text here
+            → uses the text as value of the first parameter from the tool schema
+          - Nothing:     /mcp call srv tool
+            → calls with empty args
+        """
+        if not arg:
+            print("  Usage: /mcp call <server_name> <tool_name> [args]")
+            print("  Examples:")
+            print("    /mcp call shopfans list_orders")
+            print('    /mcp call shopfans get_order {"id": 123}')
+            print("    /mcp call shopfans search some query text")
+            return
+
+        parts = arg.split(None, 2)
+        if len(parts) < 2:
+            print("  Usage: /mcp call <server_name> <tool_name> [args]")
+            return
+
+        srv_name = parts[0]
+        tool_name = parts[1]
+        args_str = parts[2].strip() if len(parts) > 2 else ""
+
+        # Find the tool first (needed for schema lookup)
+        category = f"mcp:{srv_name}"
+        ext_tools = self.registry._extensions.get(category, {})
+        if not ext_tools:
+            print(f"  Error: server '{srv_name}' not found or has no tools")
+            return
+        if tool_name not in ext_tools:
+            available = ", ".join(sorted(ext_tools.keys()))
+            print(f"  Error: tool '{tool_name}' not found in {srv_name}")
+            print(f"  Available: {available}")
+            return
+
+        # Parse args
+        call_args = {}
+        if args_str:
+            if args_str.startswith("{"):
+                # JSON object
+                try:
+                    call_args = json.loads(args_str)
+                except json.JSONDecodeError as e:
+                    print(f"  Error: invalid JSON: {e}")
+                    return
+            else:
+                # Plain text → assign to first parameter from schema
+                defn = ext_tools[tool_name].get("definition", {}).get("function", {})
+                params = defn.get("parameters", {}).get("properties", {})
+                required = defn.get("parameters", {}).get("required", [])
+                # Pick the first required param, or the first param overall
+                first_param = required[0] if required else (list(params.keys())[0] if params else None)
+                if first_param:
+                    # Auto-convert numeric values
+                    param_type = params.get(first_param, {}).get("type", "string")
+                    if param_type == "integer" and args_str.isdigit():
+                        call_args = {first_param: int(args_str)}
+                    elif param_type == "number":
+                        try:
+                            call_args = {first_param: float(args_str)}
+                        except ValueError:
+                            call_args = {first_param: args_str}
+                    else:
+                        call_args = {first_param: args_str}
+                    print(f"  {C.muted}→ {first_param}={args_str!r}{C.reset}")
+                else:
+                    print(f"  Error: tool has no parameters, but args provided: {args_str}")
+                    return
+
+        print(f"  Calling {srv_name}/{tool_name}...")
+        try:
+            result = ext_tools[tool_name]["execute"](call_args, self.tool_ctx)
+            print()
+            print(self._format_mcp_result(result))
+        except Exception as e:
+            print(f"  Error: {e}")
+
+    @staticmethod
+    def _format_mcp_result(result: str) -> str:
+        """Format MCP result for display. Pretty-print JSON if compact enough."""
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            return result
+
+        pretty = json.dumps(data, indent=2, ensure_ascii=False)
+        if pretty.count("\n") <= 100:
+            return pretty
+        # Too large — compact single-line
+        return json.dumps(data, ensure_ascii=False)
