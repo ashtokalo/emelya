@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-06-18
+
+### Added
+- **Human-readable tool display** — tool calls show localized messages: "Смотрю file.py" / "Reading file.py", "Ищу в файлах pattern" / "Searching for pattern", etc. Unified `● Action` format with i18n
+- **Edit diff preview** — edit tool calls show a compact diff with line numbers, colored added/removed lines (green/red background), and summary ("Добавлено 3 строк, Удалено 1 строк")
+- **Write preview** — write tool calls show first 10 lines of content with line numbers
+- **Clean read display** — read results hide `[Lines N-M of K]` metadata, show only content lines
+- **Relative paths** — tool display strips work_dir prefix for cleaner output
+- **Suppressed redundant results** — "Replaced N occurrence(s)" and "Written N lines" no longer shown after diff/preview
+- **`/export [path]`** — exports full conversation including all tool calls, diffs, and results to Markdown
+- **`/branch [name]`** — creates a branch of the current conversation at this point
+- **`/rename <name>`** — renames current session (was `/save`)
+- **`/resume [name]`** — resumes a previous session (was `/load`); also `--resume SESSION` CLI arg
+- **`/clear`** — now saves current session and starts fresh (was `/new`); old clear behavior merged in
+- **Command name autocompletion** — `/re<Tab>` → `/rename`, `/resume`; all `/commands` completable
+- **Semi-auto compact** — prompts user when context exceeds 75% of limit: compact, clear, or continue
+- **Settings file** — `.emelya/settings.json` for persistent defaults (temperature, confirm, use, etc.); CLI args override
+- **SIGTERM handler** — clean MCP shutdown on kill signal
+- **Parallel tool execution** — read-only tools (read, grep, glob, list_dir, man, web_search) run in parallel via ThreadPoolExecutor
+- **Grep timeout** — 10s deadline prevents pathological regex from hanging
+- **Read limits** — `limit` capped at 2000 lines, long lines truncated at 500 chars
+- **LRU eviction** — bash output cache limited to 20 entries
+
+### Fixed
+- **Security: command chaining bypass** — `_is_readonly` now blocks `;`, `&&`, `||` before pipe split
+- **Security: SSRF** — `web_fetch` blocks loopback, RFC 1918, link-local IPs
+- **Security: debug dumps** — removed full request dumps (contained prompts), added rotation (max 20 files), restricted directory permissions
+- **Security: API keys** — `models.json` gets `chmod 0600` on write
+- **agent.py summary routing** — step-limit summary now uses the routed `llm_client`, not `ctx.llm_client`
+- **README: models.json** — fixed example to use actual keys (`base_url`/`model`, not `host`/`port`) with `{"models": {...}}` wrapper
+- **README: max-iterations** — corrected default from 20 to 10
+- **Removed duplicated code** — `is_binary()` extracted to `tools/__init__.py`; `strip_model_suffix()` extracted to `models.py`; removed `import time as _time` inside loop
+
+### Changed
+- **Package structure** — `src/*.py` → `src/emelya/*.py` proper Python package; `pip install -e .` now works via pyproject.toml
+- **pyproject.toml** — version 0.5.0, classifiers, `[tool.setuptools.package-dir] "" = "src"`
+- **218 tests** (was 45) — added tests for LLM client (mock HTTP), agent loop, commands, MCP, web_fetch, documents/archives, line_editor, i18n, log
+
 ## [0.4.0] - 2026-06-17
 
 ### Added
@@ -14,7 +52,7 @@ All notable changes to this project will be documented in this file.
 - **Bash output limit with cache** — `max_output` parameter (default 8192 chars, max 512K); truncated output is cached so re-running with larger limit doesn't re-execute the command
 - **Display truncation** — tool results in terminal limited by lines (10), chars per line (200), and total chars (2000) to prevent screen flooding from grep/curl output
 - **Direct MCP interaction** — `/mcp tools <name>` lists tools with descriptions and parameters; `/mcp call <name> <tool> [args]` executes tools without the model. Args can be JSON or plain text (auto-mapped to first parameter). JSON responses pretty-printed (≤100 lines) or compact. Tab completion for server names and tool names
-- **REPL decomposition** — `repl.py` split into `models.py`, `mcp_manager.py`, `commands.py` via mixin pattern; `repl.py` reduced from 1674 to 749 lines
+- **REPL decomposition** — `repl.py` split into `models.py`, `mcp_manager.py`, `commands.py` via mixin pattern
 
 ## [0.3.0] - 2026-06-14
 

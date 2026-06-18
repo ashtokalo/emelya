@@ -98,6 +98,9 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         self._manual_model = False  # True = routing disabled, use self.llm directly
         self.llm = self._create_llm_client()
 
+        # Full conversation log for export (includes tool calls, not just final text)
+        self.conversation_log = []
+
         # Session management
         self.session_name = datetime.now().strftime("tmp%Y%m%d%H%M%S")
         self.log = self._create_log()
@@ -227,37 +230,150 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         except (EOFError, KeyboardInterrupt):
             return False
 
+    def _short_path(self, path: str) -> str:
+        """Strip work_dir prefix from path for cleaner display."""
+        wd = str(self.config.work_dir)
+        if path.startswith(wd + "/"):
+            return path[len(wd) + 1:]
+        return path
+
     def _print_tool_call(self, tc: dict):
         """Display tool call to user."""
         name = tc["name"]
         args = tc["args"]
         if name == "bash":
-            desc = args.get("description", "")
+            desc = args.get("description", args.get("command", ""))
             cmd = args.get("command", "")
-            print(f"\n  {C.tool_call}bash:{C.reset} {desc}")
-            print(f"  {C.muted}$ {cmd}{C.reset}")
+            print(f"\n  {C.tool_call}● {t('tool_bash', desc=desc)}{C.reset}")
+            print(f"  {C.muted}  $ {cmd}{C.reset}")
         elif name == "read":
-            print(f"\n  {C.tool_call}read:{C.reset} {args.get('path', '')}")
+            print(f"\n  {C.tool_call}● {t('tool_read', path=self._short_path(args.get('path', '')))}{C.reset}")
         elif name == "write":
-            print(f"\n  {C.tool_call}write:{C.reset} {args.get('path', '')}")
+            self._print_write_preview(self._short_path(args.get("path", "")), args.get("content", ""))
         elif name == "edit":
-            print(f"\n  {C.tool_call}edit:{C.reset} {args.get('path', '')}")
+            edit_args = dict(args)
+            edit_args["path"] = self._short_path(edit_args.get("path", ""))
+            self._print_edit_diff(edit_args)
         elif name == "glob":
-            print(f"\n  {C.tool_call}glob:{C.reset} {args.get('pattern', '')}")
+            print(f"\n  {C.tool_call}● {t('tool_glob', pattern=args.get('pattern', ''))}{C.reset}")
         elif name == "grep":
             pattern = args.get("pattern", "")
             include = args.get("include", "")
-            extra = f" ({include})" if include else ""
-            print(f"\n  {C.tool_call}grep:{C.reset} {pattern}{extra}")
+            if include:
+                pattern = f"{pattern} ({include})"
+            print(f"\n  {C.tool_call}● {t('tool_grep', pattern=pattern)}{C.reset}")
         elif name == "skill":
-            print(f"\n  {C.tool_call}skill:{C.reset} {args.get('name', '')}")
+            print(f"\n  {C.tool_call}● {t('tool_skill', name=args.get('name', ''))}{C.reset}")
         elif name == "agent":
-            print(f"\n  {C.tool_call}agent:{C.reset} {args.get('name', '')}")
+            print(f"\n  {C.tool_call}● {t('tool_agent', name=args.get('name', ''))}{C.reset}")
         else:
-            print(f"\n  {C.tool_call}{name}:{C.reset} {json.dumps(args, ensure_ascii=False)}")
+            detail = str(args)[:80] if args else ""
+            print(f"\n  {C.tool_call}● {t('tool_other', name=name)}({detail}){C.reset}")
+
+    def _print_write_preview(self, path: str, content: str):
+        """Show write preview with first lines of content."""
+        lines = content.splitlines() if content else []
+        n_lines = len(lines)
+        print(f"\n  {C.tool_call}● {t('tool_write', path=path)}{C.reset}")
+        print(f"  ⎿  {t('tool_n_lines', n=n_lines)}")
+        max_preview = 10
+        for i, line in enumerate(lines[:max_preview]):
+            print(f"  {C.diff_add}  {i + 1:4}  {line}{C.reset}")
+        if n_lines > max_preview:
+            print(f"  {C.muted}  {t('tool_more_lines', n=n_lines - max_preview)}{C.reset}")
+
+    def _print_edit_diff(self, args: dict):
+        """Show a compact diff for edit tool calls with line numbers."""
+        import difflib
+        path = args.get("path", "")
+        old = args.get("old_string", "")
+        new = args.get("new_string", "")
+        old_lines = old.splitlines()
+        new_lines = new.splitlines()
+
+        # Count added/removed
+        n_added = sum(1 for l in difflib.unified_diff(old_lines, new_lines, n=0, lineterm="")
+                      if l.startswith("+") and not l.startswith("+++"))
+        n_removed = sum(1 for l in difflib.unified_diff(old_lines, new_lines, n=0, lineterm="")
+                        if l.startswith("-") and not l.startswith("---"))
+        parts = []
+        if n_added:
+            parts.append(t("tool_added", n=n_added))
+        if n_removed:
+            parts.append(t("tool_removed", n=n_removed))
+        if not n_added and not n_removed:
+            parts.append(t("tool_changed", n=len(old_lines)))
+        summary = ", ".join(parts)
+
+        print(f"\n  {C.tool_call}● {t('tool_edit', path=path)}{C.reset}")
+        print(f"  ⎿  {summary}")
+
+        # Find the starting line number in the actual file
+        start_line = 1
+        try:
+            resolved = self.sandbox.validate(path)
+            if resolved.exists():
+                file_text = resolved.read_text(encoding="utf-8", errors="replace")
+                idx = file_text.find(old)
+                if idx >= 0:
+                    start_line = file_text[:idx].count("\n") + 1
+        except Exception:
+            pass
+
+        # Build diff with line numbers
+        diff = list(difflib.unified_diff(old_lines, new_lines, n=2, lineterm=""))
+        if not diff:
+            return
+
+        max_diff_lines = 20
+        shown = 0
+        old_num = start_line
+        new_num = start_line
+        for line in diff:
+            if line.startswith("---") or line.startswith("+++"):
+                continue
+            if line.startswith("@@"):
+                continue
+            if shown >= max_diff_lines:
+                remaining = len([l for l in diff if l and l[0] in "+-  " and not l.startswith(("---", "+++"))]) - shown
+                if remaining > 0:
+                    print(f"  {C.muted}  {t('tool_more_lines', n=remaining)}{C.reset}")
+                break
+            if line.startswith("-"):
+                print(f"  {C.diff_del}  {old_num:4} - {line[1:]}{C.reset}")
+                old_num += 1
+            elif line.startswith("+"):
+                print(f"  {C.diff_add}  {new_num:4} + {line[1:]}{C.reset}")
+                new_num += 1
+            else:
+                print(f"  {C.diff_ctx}  {old_num:4}   {line[1:]}{C.reset}")
+                old_num += 1
+                new_num += 1
+            shown += 1
 
     def _print_tool_result(self, name: str, result: str):
         """Display tool result (abbreviated). Limits lines, chars per line, and total chars."""
+        # Suppress redundant success messages for edit/write — diff/preview already shown
+        if not result.startswith("Error:") and not result.startswith("Cancel"):
+            if name == "edit" and result.startswith("Replaced "):
+                return
+            if name == "write" and result.startswith("Written "):
+                return
+            # For read — strip [Lines ...] footer, show content lines only
+            if name == "read" and not result.startswith("Error:"):
+                lines = result.split("\n")
+                content_lines = [l for l in lines if not l.startswith("[Lines ")]
+                total_info = next((l for l in lines if l.startswith("[Lines ")), "")
+                max_show = 10
+                for line in content_lines[:max_show]:
+                    if len(line) > 200:
+                        line = line[:200] + "…"
+                    print(f"  {C.tool_result}{line}{C.reset}")
+                remaining = len(content_lines) - max_show
+                if remaining > 0:
+                    print(f"  {C.muted}  {t('tool_more_lines', n=remaining)}{C.reset}")
+                return
+
         is_error = result.startswith("Error:")
         color = C.tool_error if is_error else C.tool_result
         max_total = 2000   # max total chars to display
@@ -423,6 +539,12 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 result = f"Plan execution error: {e}\nRaw plan: {result[:500]}"
 
         self._print_tool_result(tc["name"], result)
+        self.conversation_log.append({
+            "type": "tool_call", "name": tc["name"], "args": tc["args"],
+        })
+        self.conversation_log.append({
+            "type": "tool_result", "name": tc["name"], "content": result,
+        })
         work_messages.append({
             "role": "tool",
             "tool_call_id": tc["id"],
@@ -479,6 +601,12 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 result, elapsed = results[idx]
                 self.log.tool_exec(tc["name"], tc["args"], result, elapsed)
             self._print_tool_result(tc["name"], result)
+            self.conversation_log.append({
+                "type": "tool_call", "name": tc["name"], "args": tc["args"],
+            })
+            self.conversation_log.append({
+                "type": "tool_result", "name": tc["name"], "content": result,
+            })
             work_messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
@@ -492,6 +620,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         Only user input and final text response go into the main context.
         """
         self.context.add_user(user_input)
+        self.conversation_log.append({"type": "user", "content": user_input})
 
         # First call — from main context (update usage for accurate token tracking)
         tools = self.registry.get_tools(compact=self._use_compact_tools)
@@ -512,7 +641,9 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         tool_calls = response.get("tool_calls")
         if not tool_calls:
             # Simple text response — save directly to main context
-            self.context.add_assistant_text(response.get("content") or "")
+            text = response.get("content") or ""
+            self.context.add_assistant_text(text)
+            self.conversation_log.append({"type": "assistant", "content": text})
             return
 
         # Has tool calls — switch to work context
@@ -626,6 +757,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         # Only the final text goes into main context
         if final_text:
             self.context.add_assistant_text(final_text)
+            self.conversation_log.append({"type": "assistant", "content": final_text})
 
         # Autosave session
         self._autosave()
@@ -813,6 +945,10 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             str(self.config.work_dir), self.session_name,
         )
 
+        # Resume session if --resume was passed
+        if self.config.resume_session:
+            self._cmd_resume(self.config.resume_session)
+
         # Interactive line editor with per-session history
         self.input_history = InputHistory(str(self._session_dir() / "history"))
         editor = LineEditor(work_dir=self.config.work_dir)
@@ -839,7 +975,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 if not self._handle_command(user_input):
                     cmd = user_input.split()[0]
                     print(f"  {t('unknown_cmd')}: {cmd}")
-                    print("  Available: /help /clear /compact /undo /drop /save /load /new /model /skill /agent /tools /mcp /stats /context /history /exit")
+                    print("  Available: /help /clear /compact /undo /drop /rename /resume /branch /export /model /skill /agent /tools /mcp /stats /context /history /exit")
                 continue
 
             # Check context budget before sending to model

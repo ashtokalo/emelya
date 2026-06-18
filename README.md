@@ -184,12 +184,13 @@ Instructions loaded into context on demand. Model decides when to load them.
 
 | Command | Description |
 |---------|-------------|
-| `/clear` | Clear conversation context |
+| `/clear` | Clear conversation history, start fresh session |
 | `/compact` | Summarize context via LLM |
 | `/undo` | Undo last file modification |
-| `/save [name]` | Save session |
-| `/load [name]` | Load session (no args = list sessions) |
-| `/new [name]` | Start new session |
+| `/rename <name>` | Rename current session |
+| `/resume [name]` | Resume a previous session (no args = list) |
+| `/branch [name]` | Branch conversation into a new session |
+| `/export [path]` | Export conversation to a text file |
 | `/model [name]` | Switch active model (no args = list models) |
 | `/skill [name]` | Load a skill into context (no args = list skills) |
 | `/agent <name> <task>` | Run a sub-agent with a task |
@@ -211,6 +212,7 @@ Instructions loaded into context on demand. Model decides when to load them.
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--use` | | Use a named model from `models.json` |
+| `--resume` | | Resume a previous session by name |
 | `--host` | localhost | llama.cpp server host |
 | `--port` | 8080 | llama.cpp server port |
 | `--model` | default | Model name |

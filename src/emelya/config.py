@@ -18,6 +18,7 @@ class Config:
     max_iterations: int = 10
     stream: bool = True
     confirm_mode: str = "confirm_all"  # confirm_all | confirm_write | no_confirm
+    resume_session: str = None  # session name to resume
 
     @property
     def base_url(self) -> str:
@@ -43,6 +44,8 @@ def parse_args(argv=None) -> Config:
     parser.add_argument("--context-limit", type=int, default=8000)
     parser.add_argument("--work-dir", default=".")
     parser.add_argument("--max-iterations", type=int, default=10)
+    parser.add_argument("--resume", default=None, metavar="SESSION",
+                        help="Resume a previous session by name")
     parser.add_argument("--no-stream", action="store_true")
     parser.add_argument(
         "--confirm",
@@ -78,6 +81,7 @@ def parse_args(argv=None) -> Config:
         max_iterations=pick(args.max_iterations, "max_iterations", "max_iterations", 10),
         stream=not pick(args.no_stream, "no_stream", "no_stream", False),
         confirm_mode=confirm_map[pick(args.confirm, "confirm", "confirm", "all")],
+        resume_session=args.resume,
     )
 
 

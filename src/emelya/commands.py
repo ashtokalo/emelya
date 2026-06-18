@@ -3,6 +3,7 @@
 import json
 from datetime import datetime
 
+from emelya import __version__
 from emelya.i18n import t
 from emelya.theme import C
 from emelya.log import SessionLog, UsageTracker, collect_stats
@@ -25,11 +26,7 @@ class CommandsMixin:
             return True
 
         if command == "/clear":
-            self.context.clear()
-            self.tool_ctx.files_read.clear()
-            self.tool_ctx.loaded_skills.clear()
-            tokens = self.context.estimate_tokens()
-            print(f"  {t('context_cleared')} [{tokens} tokens]")
+            self._cmd_clear()
             return True
 
         if command == "/undo":
@@ -96,16 +93,20 @@ class CommandsMixin:
                 print(f"  {result}")
             return True
 
-        if cmd == "/save":
-            self._cmd_save(arg)
+        if cmd == "/rename":
+            self._cmd_rename(arg)
             return True
 
-        if cmd == "/load":
-            self._cmd_load(arg)
+        if cmd == "/resume":
+            self._cmd_resume(arg)
             return True
 
-        if cmd == "/new":
-            self._cmd_new(arg)
+        if cmd == "/branch":
+            self._cmd_branch(arg)
+            return True
+
+        if cmd == "/export":
+            self._cmd_export(arg)
             return True
 
         if cmd == "/mcp":
@@ -145,36 +146,34 @@ class CommandsMixin:
             print(f"  {t('unknown_model')}: {subcmd}")
             print("  Usage: /model, /model <name>, /model add <name> <url> <model> [api_key], /model remove <name>")
 
-    def _cmd_save(self, name: str = ""):
-        """Save current session."""
+    def _cmd_rename(self, name: str = ""):
+        """Rename current session."""
+        if not name:
+            print(f"  Usage: /rename <new_name>")
+            print(f"  Current: {self.session_name}")
+            return
+
         old_name = self.session_name
-        if name:
-            self.session_name = name
+        self.session_name = name
         session_dir = self._session_dir()
 
-        # Save context
+        # Save context to new location
         self.context.save(session_dir / "context.json")
 
-        # If session name changed, move log to new location
-        if name and name != old_name:
-            self.log.event(f"Session saved as: {self.session_name}")
-            old_log_path = self.log.path
-            self.log.close()
-            # Copy log to new session dir
-            import shutil
-            new_log_path = session_dir / "log.txt"
-            if old_log_path != new_log_path:
-                shutil.copy2(old_log_path, new_log_path)
-            # Continue logging in new location
-            self.log = SessionLog(new_log_path)
-        else:
-            self.log.event(f"Session saved: {self.session_name}")
+        # Move log to new session dir
+        self.log.event(f"Session renamed: {old_name} -> {name}")
+        old_log_path = self.log.path
+        self.log.close()
+        import shutil
+        new_log_path = session_dir / "log.txt"
+        if old_log_path != new_log_path:
+            shutil.copy2(old_log_path, new_log_path)
+        self.log = SessionLog(new_log_path)
 
         print(f"  {t('session_saved')}: {self.session_name}")
-        print(f"  {session_dir}")
 
-    def _cmd_load(self, name: str = ""):
-        """Load a saved session."""
+    def _cmd_resume(self, name: str = ""):
+        """Resume a previous session."""
         if not name:
             # List available sessions
             if not self.sessions_dir.is_dir():
@@ -200,14 +199,15 @@ class CommandsMixin:
             print(f"  {t('session_not_found')}: {name}")
             return
 
-        # Close current log, switch session
+        # Autosave current before switching
+        self._autosave()
         self.log.event(f"Switching to session: {name}")
         self.log.close()
 
         self.session_name = name
         self.context.load(ctx_path)
         self.log = self._create_log()
-        self.log.event(f"Session loaded: {name}")
+        self.log.event(f"Session resumed: {name}")
         self.tool_ctx.files_read.clear()
         self.tool_ctx.loaded_skills.clear()
         self.input_history = InputHistory(str(self._session_dir() / "history"))
@@ -216,16 +216,17 @@ class CommandsMixin:
         n_msgs = len(self.context.messages)
         print(f"  {t('session_loaded')}: {name} ({n_msgs} messages, {tokens} tokens)")
 
-    def _cmd_new(self, name: str = ""):
-        """Start a new session."""
-        # Save current if it has content
+    def _cmd_clear(self):
+        """Clear conversation history — save current session, start fresh."""
+        # Autosave current if it has content
         if self.context.messages:
-            self._cmd_save()
+            self._autosave()
 
         self.log.close()
 
-        self.session_name = name or datetime.now().strftime("tmp%Y%m%d%H%M%S")
+        self.session_name = datetime.now().strftime("tmp%Y%m%d%H%M%S")
         self.context.clear()
+        self.conversation_log.clear()
         self.tool_ctx.files_read.clear()
         self.tool_ctx.loaded_skills.clear()
         self._init_system_prompt()
@@ -238,7 +239,105 @@ class CommandsMixin:
         self.input_history = InputHistory(str(self._session_dir() / "history"))
 
         tokens = self.context.estimate_tokens()
-        print(f"  {t('new_session')}: {self.session_name} [{tokens} tokens]")
+        print(f"  {t('context_cleared')} [{tokens} tokens]")
+
+    def _cmd_branch(self, name: str = ""):
+        """Create a branch — copy current conversation to a new session and switch to it."""
+        branch_name = name or (self.session_name + "-branch-" + datetime.now().strftime("%H%M%S"))
+
+        # Autosave current session first
+        self._autosave()
+        old_name = self.session_name
+
+        # Switch to new session name
+        self.session_name = branch_name
+        session_dir = self._session_dir()
+
+        # Save current context (full copy) to the new session
+        self.context.save(session_dir / "context.json")
+
+        # Start new log for the branch
+        self.log.event(f"Branched to: {branch_name}")
+        self.log.close()
+        self.log = self._create_log()
+        self.log.session_start(
+            self.config.base_url, self.config.model,
+            str(self.config.work_dir), self.session_name,
+        )
+        self.log.event(f"Branched from: {old_name}")
+        self.input_history = InputHistory(str(session_dir / "history"))
+
+        tokens = self.context.estimate_tokens()
+        n_msgs = len(self.context.messages)
+        print(f"  Branched: {old_name} → {branch_name} ({n_msgs} messages, {tokens} tokens)")
+
+    def _cmd_export(self, path: str = ""):
+        """Export full conversation to a readable text file, including all tool calls."""
+        if not path:
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            path = f"{self.session_name}-{ts}.md"
+
+        export_path = self.config.work_dir / path
+
+        lines = [f"# Conversation: {self.session_name}\n"]
+
+        for entry in self.conversation_log:
+            etype = entry["type"]
+            if etype == "user":
+                lines.append(f"## User\n\n{entry['content']}\n")
+            elif etype == "assistant":
+                lines.append(f"## Assistant\n\n{entry['content']}\n")
+            elif etype == "tool_call":
+                name = entry["name"]
+                args = entry.get("args", {})
+                if name == "edit":
+                    old = args.get("old_string", "")
+                    new = args.get("new_string", "")
+                    lines.append(f"**● {t('tool_edit', path=args.get('path', ''))}**\n")
+                    if old or new:
+                        lines.append("```diff")
+                        for l in old.splitlines():
+                            lines.append(f"- {l}")
+                        for l in new.splitlines():
+                            lines.append(f"+ {l}")
+                        lines.append("```\n")
+                elif name == "write":
+                    content = args.get("content", "")
+                    n = content.count("\n") + 1 if content else 0
+                    lines.append(f"**● {t('tool_write', path=args.get('path', ''))}** ({n} lines)\n")
+                    preview = "\n".join(content.splitlines()[:20])
+                    if content.count("\n") > 20:
+                        preview += f"\n... ({content.count(chr(10)) + 1} lines total)"
+                    lines.append(f"```\n{preview}\n```\n")
+                elif name == "bash":
+                    cmd = args.get("command", "")
+                    desc = args.get("description", cmd)
+                    lines.append(f"**● {t('tool_bash', desc=desc)}**\n```bash\n{cmd}\n```\n")
+                elif name == "read":
+                    lines.append(f"**● {t('tool_read', path=args.get('path', ''))}**\n")
+                elif name == "grep":
+                    lines.append(f"**● {t('tool_grep', pattern=args.get('pattern', ''))}**\n")
+                elif name == "glob":
+                    lines.append(f"**● {t('tool_glob', pattern=args.get('pattern', ''))}**\n")
+                elif name == "agent":
+                    lines.append(f"**● {t('tool_agent', name=args.get('name', ''))}** {json.dumps(args.get('args', {}), ensure_ascii=False)}\n")
+                else:
+                    lines.append(f"**● {t('tool_other', name=name)}** `{json.dumps(args, ensure_ascii=False)}`\n")
+            elif etype == "tool_result":
+                content = entry.get("content", "")
+                if content.startswith("Error:"):
+                    lines.append(f"❌ {content}\n")
+                else:
+                    # Abbreviate long results
+                    preview = content[:1000]
+                    if len(content) > 1000:
+                        preview += f"\n... ({len(content)} chars total)"
+                    lines.append(f"<details><summary>Result ({len(content)} chars)</summary>\n\n```\n{preview}\n```\n</details>\n")
+
+        n_entries = len(self.conversation_log)
+        text = "\n".join(lines)
+        export_path.write_text(text, encoding="utf-8")
+        print(f"  Exported: {export_path} ({n_entries} entries, {len(text)} chars)")
 
     def _cmd_skill(self, arg: str = ""):
         """Load a skill and inject into current context as user instruction."""
@@ -382,7 +481,7 @@ class CommandsMixin:
   ██╔═╝   ██║ ╚██║ ██╔═╝    ██║  ██║  ██╔══██║
   ██████╗ ██║  ██║ ██████╗ ██╔╝  ██║ ██╔╝  ██║
   ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝   ╚═╝ ╚═╝   ╚═╝{C.reset}
-  {C.muted}Emelya — CLI AI Agent v0.1, Fairy-tale dimwit{C.reset}"""
+  {C.muted}Emelya — CLI AI Agent v{__version__}, Fairy-tale dimwit{C.reset}"""
         print(logo)
         print()
         print(f"  {C.info}{t('workdir')}{C.reset} {self.config.work_dir}")

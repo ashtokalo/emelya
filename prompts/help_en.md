@@ -9,14 +9,15 @@
   Commands:
 
   /help                  — this help
-  /clear                 — clear conversation context
+  /clear                 — clear history, start fresh session
   /compact               — compress context (model summarizes history)
   /undo                  — undo last file change
   /drop N                — remove message N from context (/history for numbers)
 
-  /save [name]           — save session
-  /load [name]           — load session (no args = list sessions)
-  /new [name]            — start new session
+  /rename <name>         — rename current session
+  /resume [name]         — resume a previous session (no args = list)
+  /branch [name]         — branch conversation at this point into a new session
+  /export [path]         — export conversation to a text file
 
   /model                 — list models
   /model name            — switch model

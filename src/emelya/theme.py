@@ -44,6 +44,11 @@ class _Theme:
     # Spinner
     spinner = "\033[33m"           # yellow
 
+    # Diff
+    diff_add = "\033[42;30m"       # green background — added lines
+    diff_del = "\033[41;37m"       # red background — removed lines
+    diff_ctx = "\033[2m"           # dim — context lines
+
     # Commands
     command = "\033[36m"           # cyan — /commands output
 

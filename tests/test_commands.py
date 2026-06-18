@@ -1,4 +1,4 @@
-"""Tests for commands — /save, /load, /new, /model, /mcp, /compact."""
+"""Tests for commands — /rename, /resume, /clear, /model, /mcp, /compact."""
 
 import json
 import sys
@@ -54,6 +54,7 @@ class MockREPL(ModelMixin, MCPMixin, CommandsMixin):
             sandbox=self.sandbox,
         )
 
+        self.conversation_log = []
         self._model_display = "test-model"
         self._models = {"local": {"base_url": "http://localhost:8080", "model": "default"}}
         self._models_path = tmpdir / ".emelya" / "models.json"
@@ -80,6 +81,12 @@ class MockREPL(ModelMixin, MCPMixin, CommandsMixin):
     def _agent_loop(self, user_input):
         pass
 
+    def _autosave(self):
+        try:
+            self.context.save(self._session_dir() / "context.json")
+        except Exception:
+            pass
+
     def cleanup(self):
         self.log.close()
         self.usage_tracker.close()
@@ -95,37 +102,37 @@ class TestHandleCommand(unittest.TestCase):
         self.repl.cleanup()
 
     def test_clear(self):
-        from emelya.commands import CommandsMixin
         self.repl.context.add_user("hello")
         self.repl.context.add_assistant_text("hi")
-        self.repl._handle_command( "/clear")
+        with patch("builtins.print"):
+            self.repl._handle_command("/clear")
         self.assertEqual(len(self.repl.context.messages), 0)
 
     def test_undo_empty(self):
-        from emelya.commands import CommandsMixin
+
         with patch("builtins.print") as mock_print:
             self.repl._handle_command( "/undo")
         mock_print.assert_called()
 
     def test_tools(self):
-        from emelya.commands import CommandsMixin
+
         with patch("builtins.print"):
             result = self.repl._handle_command( "/tools")
         self.assertTrue(result)
 
     def test_context(self):
-        from emelya.commands import CommandsMixin
+
         with patch("builtins.print"):
             result = self.repl._handle_command( "/context")
         self.assertTrue(result)
 
     def test_unknown_returns_false(self):
-        from emelya.commands import CommandsMixin
+
         result = self.repl._handle_command( "/nonexistent_cmd")
         self.assertFalse(result)
 
 
-class TestSaveLoad(unittest.TestCase):
+class TestRenameResumeClear(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp())
@@ -134,42 +141,75 @@ class TestSaveLoad(unittest.TestCase):
     def tearDown(self):
         self.repl.cleanup()
 
-    def test_save_creates_context_file(self):
-        from emelya.commands import CommandsMixin
+    def test_rename_changes_session(self):
         self.repl.context.add_user("hello")
         self.repl.context.add_assistant_text("world")
         with patch("builtins.print"):
-            self.repl._cmd_save( "my_session")
+            self.repl._cmd_rename("my_session")
+        self.assertEqual(self.repl.session_name, "my_session")
         ctx_file = self.repl.sessions_dir / "my_session" / "context.json"
         self.assertTrue(ctx_file.exists())
 
-    def test_load_restores_context(self):
-        from emelya.commands import CommandsMixin
-        # Save first
+    def test_rename_no_arg_shows_usage(self):
+        with patch("builtins.print") as mock_print:
+            self.repl._cmd_rename("")
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("rename", printed.lower())
+
+    def test_resume_restores_context(self):
+        # Save first via autosave
         self.repl.context.add_user("hello")
         self.repl.context.add_assistant_text("world")
+        self.repl._autosave()
+        saved_name = self.repl.session_name
+        # Clear and resume
         with patch("builtins.print"):
-            self.repl._cmd_save( "saved")
-        # Clear and load
-        self.repl.context.clear()
+            self.repl._cmd_clear()
         self.assertEqual(len(self.repl.context.messages), 0)
         with patch("builtins.print"):
-            self.repl._cmd_load( "saved")
+            self.repl._cmd_resume(saved_name)
         self.assertEqual(len(self.repl.context.messages), 2)
 
-    def test_load_nonexistent(self):
+    def test_resume_nonexistent(self):
         with patch("builtins.print") as mock_print:
-            self.repl._cmd_load("nonexistent")
+            self.repl._cmd_resume("nonexistent")
         printed = " ".join(str(c) for c in mock_print.call_args_list)
         self.assertIn("nonexistent", printed)
 
-    def test_new_clears_context(self):
-        from emelya.commands import CommandsMixin
+    def test_resume_no_arg_lists_sessions(self):
+        # Create a session first
+        self.repl._autosave()
+        with patch("builtins.print") as mock_print:
+            self.repl._cmd_resume("")
+        self.assertTrue(len(mock_print.call_args_list) > 0)
+
+    def test_branch_copies_context(self):
+        self.repl.context.add_user("hello")
+        self.repl.context.add_assistant_text("world")
+        old_name = self.repl.session_name
+        with patch("builtins.print"):
+            self.repl._cmd_branch("my-branch")
+        # Session changed, context preserved
+        self.assertEqual(self.repl.session_name, "my-branch")
+        self.assertNotEqual(self.repl.session_name, old_name)
+        self.assertEqual(len(self.repl.context.messages), 2)
+        # Both sessions have context files
+        self.assertTrue((self.repl.sessions_dir / old_name / "context.json").exists())
+        self.assertTrue((self.repl.sessions_dir / "my-branch" / "context.json").exists())
+
+    def test_branch_auto_name(self):
         self.repl.context.add_user("hello")
         with patch("builtins.print"):
-            self.repl._cmd_new( "fresh")
+            self.repl._cmd_branch("")
+        self.assertIn("branch", self.repl.session_name)
+
+    def test_clear_starts_fresh(self):
+        self.repl.context.add_user("hello")
+        old_name = self.repl.session_name
+        with patch("builtins.print"):
+            self.repl._cmd_clear()
         self.assertEqual(len(self.repl.context.messages), 0)
-        self.assertEqual(self.repl.session_name, "fresh")
+        self.assertNotEqual(self.repl.session_name, old_name)
 
 
 class TestModelCommand(unittest.TestCase):
@@ -182,14 +222,14 @@ class TestModelCommand(unittest.TestCase):
         self.repl.cleanup()
 
     def test_list_models(self):
-        from emelya.commands import CommandsMixin
+
         with patch("builtins.print") as mock_print:
             self.repl._cmd_model( "")
         printed = " ".join(str(c) for c in mock_print.call_args_list)
         self.assertIn("local", printed)
 
     def test_unknown_model(self):
-        from emelya.commands import CommandsMixin
+
         with patch("builtins.print") as mock_print:
             self.repl._cmd_model( "nonexistent")
         printed = " ".join(str(c) for c in mock_print.call_args_list)
@@ -206,7 +246,7 @@ class TestMCPCommand(unittest.TestCase):
         self.repl.cleanup()
 
     def test_mcp_status_empty(self):
-        from emelya.mcp_manager import MCPMixin
+
         with patch("builtins.print") as mock_print:
             self.repl._mcp_status()
         printed = " ".join(str(c) for c in mock_print.call_args_list)
@@ -226,13 +266,13 @@ class TestMCPCommand(unittest.TestCase):
         self.assertIn("nonexistent", printed)
 
     def test_mcp_format_result_json(self):
-        from emelya.mcp_manager import MCPMixin
+
         result = MCPMixin._format_mcp_result('{"key": "value"}')
         self.assertIn("key", result)
         self.assertIn("\n", result)  # pretty-printed
 
     def test_mcp_format_result_plain(self):
-        from emelya.mcp_manager import MCPMixin
+
         result = MCPMixin._format_mcp_result("plain text")
         self.assertEqual(result, "plain text")
 

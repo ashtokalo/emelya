@@ -105,6 +105,37 @@ class TestCommandCompletion(unittest.TestCase):
         self.assertIsInstance(items, list)
 
 
+class TestCommandNameCompletion(unittest.TestCase):
+
+    def test_full_prefix(self):
+        items = LineEditor._complete_command_name("help")
+        self.assertEqual(items, ["/help"])
+
+    def test_partial_prefix(self):
+        items = LineEditor._complete_command_name("re")
+        self.assertIn("/rename", items)
+        self.assertIn("/resume", items)
+        self.assertNotIn("/clear", items)
+
+    def test_empty_prefix(self):
+        items = LineEditor._complete_command_name("")
+        self.assertEqual(len(items), len(LineEditor._ALL_COMMANDS))
+
+    def test_no_match(self):
+        items = LineEditor._complete_command_name("zzz")
+        self.assertEqual(items, [])
+
+    def test_single_char(self):
+        items = LineEditor._complete_command_name("c")
+        self.assertIn("/clear", items)
+        self.assertIn("/compact", items)
+        self.assertIn("/context", items)
+
+    def test_branch(self):
+        items = LineEditor._complete_command_name("br")
+        self.assertEqual(items, ["/branch"])
+
+
 class TestAtQuery(unittest.TestCase):
 
     def test_find_at_query(self):

@@ -410,32 +410,54 @@ class LineEditor:
                     self._draw(prompt, buf, cursor)
                 continue
 
-            # --- Tab: completion (@path, /command args) ---
+            # --- Tab: completion (/command name, /command args, @path) ---
             if key == KEY_TAB or key == KEY_SHIFT_TAB:
                 text = "".join(c for c in buf if isinstance(c, str))
                 completed = False
 
-                # Command argument completion: /agent, /skill, /model, /load
-                cmd_match = self._find_cmd_query(text, cursor, buf)
-                if cmd_match:
-                    cmd, start_pos, query = cmd_match
-                    if comp_idx >= 0 and comp_items and comp_at_pos == start_pos:
+                # Command name completion: /re<TAB> → /rename, /resume
+                if text.startswith("/") and " " not in text:
+                    prefix = text[1:]  # strip /
+                    if comp_idx >= 0 and comp_items and comp_at_pos == 0:
                         if key == KEY_SHIFT_TAB:
                             comp_idx = (comp_idx - 1) % len(comp_items)
                         else:
                             comp_idx = (comp_idx + 1) % len(comp_items)
                     else:
-                        comp_items = self._command_completer(cmd, query)
-                        comp_at_pos = start_pos
+                        comp_items = self._complete_command_name(prefix)
+                        comp_at_pos = 0
                         comp_idx = 0 if comp_items else -1
                     if comp_idx >= 0 and comp_items:
-                        del buf[start_pos:cursor]
+                        buf.clear()
                         new_text = comp_items[comp_idx]
-                        for i, ch in enumerate(new_text):
-                            buf.insert(start_pos + i, ch)
-                        cursor = start_pos + len(new_text)
+                        for ch in new_text:
+                            buf.append(ch)
+                        cursor = len(buf)
                         self._draw(prompt, buf, cursor)
                     completed = True
+
+                # Command argument completion: /agent, /skill, /model, /resume, /mcp
+                if not completed:
+                    cmd_match = self._find_cmd_query(text, cursor, buf)
+                    if cmd_match:
+                        cmd, start_pos, query = cmd_match
+                        if comp_idx >= 0 and comp_items and comp_at_pos == start_pos:
+                            if key == KEY_SHIFT_TAB:
+                                comp_idx = (comp_idx - 1) % len(comp_items)
+                            else:
+                                comp_idx = (comp_idx + 1) % len(comp_items)
+                        else:
+                            comp_items = self._command_completer(cmd, query)
+                            comp_at_pos = start_pos
+                            comp_idx = 0 if comp_items else -1
+                        if comp_idx >= 0 and comp_items:
+                            del buf[start_pos:cursor]
+                            new_text = comp_items[comp_idx]
+                            for i, ch in enumerate(new_text):
+                                buf.insert(start_pos + i, ch)
+                            cursor = start_pos + len(new_text)
+                            self._draw(prompt, buf, cursor)
+                        completed = True
 
                 # @path completion
                 if not completed:
@@ -484,11 +506,26 @@ class LineEditor:
                 chars.append(key)
         return "".join(chars)
 
+    # All available /commands for name completion
+    _ALL_COMMANDS = [
+        "/help", "/clear", "/compact", "/undo", "/drop",
+        "/rename", "/resume", "/branch", "/export",
+        "/model", "/skill", "/agent",
+        "/tools", "/mcp",
+        "/stats", "/context", "/history", "/exit",
+    ]
+
+    @staticmethod
+    def _complete_command_name(prefix: str) -> list:
+        """Complete /command name from prefix (without the /)."""
+        prefix_lower = prefix.lower()
+        return [c for c in LineEditor._ALL_COMMANDS if c[1:].startswith(prefix_lower)]
+
     # Commands that support Tab completion for their first argument
     _COMPLETABLE_CMDS = {
         "/agent": "agents",
         "/skill": "skills",
-        "/load": "sessions",
+        "/resume": "sessions",
         "/model": "models",
         "/mcp": "mcp",
     }
