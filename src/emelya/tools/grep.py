@@ -91,11 +91,17 @@ def execute(args: dict, ctx) -> str:
     else:
         base = ctx.work_dir
 
+    import time as _time
     files = _collect_files(base, include)
     matches = []
     total_matches = 0
+    deadline = _time.monotonic() + 10  # 10s total timeout
+    timed_out = False
 
     for fpath in files:
+        if _time.monotonic() > deadline:
+            timed_out = True
+            break
         if is_binary(fpath):
             continue
         try:
@@ -126,13 +132,15 @@ def execute(args: dict, ctx) -> str:
                 else:
                     matches.append(f"{rel}:{i + 1}: {line}")
 
-    if not matches:
+    if not matches and not timed_out:
         return "No matches found"
 
     separator = "\n--\n" if context_lines > 0 else "\n"
-    result = separator.join(matches)
+    result = separator.join(matches) if matches else ""
 
     if total_matches > max_results:
         result += f"\n[truncated, showing {max_results} of {total_matches} matches]"
+    if timed_out:
+        result += f"\n[timed out after 10s, results may be incomplete. Try narrowing the path or pattern]"
 
-    return result
+    return result or "No matches found"

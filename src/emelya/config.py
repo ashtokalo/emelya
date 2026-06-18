@@ -56,16 +56,62 @@ def parse_args(argv=None) -> Config:
     work_dir = Path(args.work_dir).resolve()
     confirm_map = {"all": "confirm_all", "write": "confirm_write", "none": "no_confirm"}
 
+    # Load persistent settings (.emelya/settings.json) — CLI args override
+    settings = _load_settings(work_dir)
+    cli_explicit = _get_explicit_args(parser, argv)
+
+    def pick(cli_val, cli_name, settings_key, default):
+        """CLI arg wins if explicitly passed, else settings file, else default."""
+        if cli_name in cli_explicit:
+            return cli_val
+        return settings.get(settings_key, default)
+
     return Config(
-        host=args.host,
-        port=args.port,
-        model=args.model,
-        model_name=args.use,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        context_limit=args.context_limit,
+        host=pick(args.host, "host", "host", "localhost"),
+        port=pick(args.port, "port", "port", 8080),
+        model=pick(args.model, "model", "model", "default"),
+        model_name=pick(args.use, "use", "use", None),
+        temperature=pick(args.temperature, "temperature", "temperature", 0.7),
+        max_tokens=pick(args.max_tokens, "max_tokens", "max_tokens", 8192),
+        context_limit=pick(args.context_limit, "context_limit", "context_limit", 8000),
         work_dir=work_dir,
-        max_iterations=args.max_iterations,
-        stream=not args.no_stream,
-        confirm_mode=confirm_map[args.confirm],
+        max_iterations=pick(args.max_iterations, "max_iterations", "max_iterations", 10),
+        stream=not pick(args.no_stream, "no_stream", "no_stream", False),
+        confirm_mode=confirm_map[pick(args.confirm, "confirm", "confirm", "all")],
     )
+
+
+def _load_settings(work_dir: Path) -> dict:
+    """Load .emelya/settings.json if it exists."""
+    import json
+    settings_path = work_dir / ".emelya" / "settings.json"
+    if settings_path.exists():
+        try:
+            return json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _get_explicit_args(parser, argv) -> set:
+    """Determine which CLI args were explicitly passed (not defaults)."""
+    # Parse with defaults removed to see what user actually typed
+    sentinel = object()
+    defaults = {}
+    for action in parser._actions:
+        if action.dest == "help":
+            continue
+        defaults[action.dest] = action.default
+        action.default = sentinel
+
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return set()
+    finally:
+        # Restore defaults
+        for action in parser._actions:
+            if action.dest in defaults:
+                action.default = defaults[action.dest]
+
+    return {k for k, v in vars(args).items() if v is not sentinel}

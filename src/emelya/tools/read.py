@@ -47,7 +47,7 @@ def execute(args: dict, ctx) -> str:
         )
 
     offset = max(1, args.get("offset", 1))
-    limit = args.get("limit", 200)
+    limit = min(args.get("limit", 200), 2000)  # cap to prevent context blowup
 
     # Try UTF-8, fallback to latin-1
     for encoding in ("utf-8", "latin-1"):
@@ -69,8 +69,11 @@ def execute(args: dict, ctx) -> str:
         return f"Error: offset {offset} is beyond end of file ({total} lines)"
 
     result_lines = []
+    max_line_len = 500  # truncate very long lines (log files, minified code)
     for i in range(start, end):
         line_content = lines[i].rstrip("\n").rstrip("\r")
+        if len(line_content) > max_line_len:
+            line_content = line_content[:max_line_len] + f"… [{len(lines[i])} chars]"
         result_lines.append(f"{i + 1}\t{line_content}")
 
     remaining = total - end

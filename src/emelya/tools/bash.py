@@ -36,8 +36,9 @@ DEFINITION = {
     },
 }
 
-# Cache for truncated command outputs: command → full_output
+# Cache for truncated command outputs: command → full_output (LRU, max 20 entries)
 _output_cache = {}
+_CACHE_MAX = 20
 
 # Commands considered read-only (auto-approved even in confirm_all mode)
 READONLY_COMMANDS = {
@@ -189,7 +190,9 @@ def execute(args: dict, ctx) -> str:
 
         # Cache if output exceeds requested limit (may be re-requested with larger limit)
         if len(output) > max_output:
-            # Keep up to HARD_MAX_OUTPUT in cache
+            # Evict oldest entry if cache is full
+            if len(_output_cache) >= _CACHE_MAX:
+                _output_cache.pop(next(iter(_output_cache)))
             _output_cache[command] = (output[:HARD_MAX_OUTPUT], result.returncode)
 
         return _format_output(output, result.returncode, max_output)

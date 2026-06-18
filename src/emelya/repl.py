@@ -368,6 +368,123 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             )
         return response
 
+    def _exec_tool_single(self, tc, work_messages, _seen_calls):
+        """Execute a single tool call. Returns 'duplicate' string if skipped, else None."""
+        self._print_tool_call(tc)
+
+        # Duplicate detection
+        _call_key = (tc["name"], json.dumps(tc["args"], sort_keys=True))
+        _seen_calls[_call_key] = _seen_calls.get(_call_key, 0) + 1
+        if _seen_calls[_call_key] > 1:
+            result = (
+                f"Error: you already called {tc['name']} with the same arguments. "
+                "Use a different approach or provide your answer."
+            )
+            self.log.tool_exec(tc["name"], tc["args"], result, 0)
+            self._print_tool_result(tc["name"], result)
+            work_messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+            return "duplicate"
+
+        t0 = time.monotonic()
+        try:
+            result = self.registry.execute(tc["name"], tc["args"], self.tool_ctx)
+        except KeyboardInterrupt:
+            result = "Cancelled by user"
+        elapsed = int((time.monotonic() - t0) * 1000)
+
+        self.log.tool_exec(tc["name"], tc["args"], result, elapsed)
+
+        # Intercept plan_mode exit
+        if tc["name"] == "plan_mode" and tc["args"].get("action") == "exit":
+            try:
+                answer = input(f"\n  {C.warning}{t('allow')}{C.reset} ").strip().lower()
+                if answer not in ("y", "yes", "д", "да"):
+                    from emelya.tools.plan_mode import reset as plan_reset
+                    plan_reset()
+                    result = "Plan rejected by user. Ask what to change."
+            except (EOFError, KeyboardInterrupt):
+                from emelya.tools.plan_mode import reset as plan_reset
+                plan_reset()
+                result = "Plan rejected."
+
+        # Intercept planner result
+        if (tc["name"] == "agent"
+                and tc["args"].get("name") == "planner"
+                and '{"plan":' in result[:50]):
+            try:
+                plan_data = json.loads(result)
+                plan_result = self._execute_plan(plan_data.get("plan", []))
+                result = plan_result
+            except (json.JSONDecodeError, Exception) as e:
+                result = f"Plan execution error: {e}\nRaw plan: {result[:500]}"
+
+        self._print_tool_result(tc["name"], result)
+        work_messages.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "content": result,
+        })
+        return None
+
+    def _exec_tools_parallel(self, tool_calls, work_messages, _seen_calls, consecutive_errors):
+        """Execute multiple read-only tool calls in parallel."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Print all calls first
+        for tc in tool_calls:
+            self._print_tool_call(tc)
+
+        # Check duplicates before executing
+        tasks = []
+        for tc in tool_calls:
+            _call_key = (tc["name"], json.dumps(tc["args"], sort_keys=True))
+            _seen_calls[_call_key] = _seen_calls.get(_call_key, 0) + 1
+            if _seen_calls[_call_key] > 1:
+                tasks.append((tc, None))  # mark as duplicate
+            else:
+                tasks.append((tc, True))  # needs execution
+
+        def _run(tc):
+            t0 = time.monotonic()
+            try:
+                result = self.registry.execute(tc["name"], tc["args"], self.tool_ctx)
+            except Exception as e:
+                result = f"Error: {e}"
+            elapsed = int((time.monotonic() - t0) * 1000)
+            return result, elapsed
+
+        # Execute non-duplicate calls in parallel
+        results = {}
+        to_execute = [(tc, idx) for idx, (tc, needs) in enumerate(tasks) if needs]
+        if to_execute:
+            with ThreadPoolExecutor(max_workers=min(4, len(to_execute))) as pool:
+                futures = {pool.submit(_run, tc): (tc, idx) for tc, idx in to_execute}
+                for future in futures:
+                    tc, idx = futures[future]
+                    results[idx] = future.result()
+
+        # Assemble results in order
+        for idx, (tc, needs) in enumerate(tasks):
+            if needs is None:
+                result = (
+                    f"Error: you already called {tc['name']} with the same arguments. "
+                    "Use a different approach or provide your answer."
+                )
+                self.log.tool_exec(tc["name"], tc["args"], result, 0)
+            else:
+                result, elapsed = results[idx]
+                self.log.tool_exec(tc["name"], tc["args"], result, elapsed)
+            self._print_tool_result(tc["name"], result)
+            work_messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+
     def _agent_loop(self, user_input: str):
         """Run the agent loop with work context isolation.
 
@@ -405,73 +522,41 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         consecutive_errors = 0
         _seen_calls = {}  # (name, args_key) -> count — duplicate detection
 
+        _PARALLEL_SAFE = {"read", "grep", "glob", "list_dir", "man", "web_search"}
+
         for iteration in range(self.config.max_iterations):
-            # Execute tool calls
-            for tc in tool_calls:
-                self._print_tool_call(tc)
+            # Check if all calls are parallel-safe read-only tools
+            can_parallel = (
+                len(tool_calls) > 1
+                and all(tc["name"] in _PARALLEL_SAFE for tc in tool_calls)
+            )
 
-                # Duplicate tool call detection
-                _call_key = (tc["name"], json.dumps(tc["args"], sort_keys=True))
-                _seen_calls[_call_key] = _seen_calls.get(_call_key, 0) + 1
-                if _seen_calls[_call_key] > 1:
-                    result = (
-                        f"Error: you already called {tc['name']} with the same arguments. "
-                        "Use a different approach or provide your answer."
+            if can_parallel:
+                # Execute read-only tools in parallel
+                self._exec_tools_parallel(
+                    tool_calls, work_messages, _seen_calls, consecutive_errors,
+                )
+                # Update consecutive_errors from results
+                for msg in work_messages[-len(tool_calls):]:
+                    content = msg.get("content", "")
+                    if content.startswith("Error:"):
+                        consecutive_errors += 1
+                    else:
+                        consecutive_errors = 0
+            else:
+                # Sequential execution (with plan/mode interception)
+                for tc in tool_calls:
+                    result = self._exec_tool_single(
+                        tc, work_messages, _seen_calls,
                     )
-                    self.log.tool_exec(tc["name"], tc["args"], result, 0)
-                    self._print_tool_result(tc["name"], result)
-                    work_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result,
-                    })
-                    consecutive_errors += 1
-                    continue
+                    if result is not None:  # was duplicate
+                        consecutive_errors += 1
+                        continue
 
-                t0 = time.monotonic()
-                try:
-                    result = self.registry.execute(tc["name"], tc["args"], self.tool_ctx)
-                except KeyboardInterrupt:
-                    result = "Cancelled by user"
-                elapsed = int((time.monotonic() - t0) * 1000)
-
-                self.log.tool_exec(tc["name"], tc["args"], result, elapsed)
-
-                # Intercept plan_mode exit — ask user approval
-                if tc["name"] == "plan_mode" and tc["args"].get("action") == "exit":
-                    try:
-                        answer = input(f"\n  {C.warning}{t('allow')}{C.reset} ").strip().lower()
-                        if answer not in ("y", "yes", "д", "да"):
-                            from emelya.tools.plan_mode import reset as plan_reset
-                            plan_reset()
-                            result = "Plan rejected by user. Ask what to change."
-                    except (EOFError, KeyboardInterrupt):
-                        from emelya.tools.plan_mode import reset as plan_reset
-                        plan_reset()
-                        result = "Plan rejected."
-
-                # Intercept planner result — execute plan
-                if (tc["name"] == "agent"
-                        and tc["args"].get("name") == "planner"
-                        and '{"plan":' in result[:50]):
-                    try:
-                        plan_data = json.loads(result)
-                        plan_result = self._execute_plan(plan_data.get("plan", []))
-                        result = plan_result
-                    except (json.JSONDecodeError, Exception) as e:
-                        result = f"Plan execution error: {e}\nRaw plan: {result[:500]}"
-
-                self._print_tool_result(tc["name"], result)
-                work_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                })
-
-                if result.startswith("Error:"):
-                    consecutive_errors += 1
-                else:
-                    consecutive_errors = 0
+                    if work_messages[-1].get("content", "").startswith("Error:"):
+                        consecutive_errors += 1
+                    else:
+                        consecutive_errors = 0
 
             # Break if too many consecutive errors — force answer
             if consecutive_errors >= 3:
@@ -684,6 +769,9 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
 
     def run(self):
         """Main REPL loop."""
+        import signal
+        signal.signal(signal.SIGTERM, lambda *_: self._cleanup() or sys.exit(0))
+
         self._print_banner()
 
         # Check connection (non-fatal)
@@ -764,6 +852,10 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             except KeyboardInterrupt:
                 print(f"\n  {t('interrupted')}")
 
+        self._cleanup()
+
+    def _cleanup(self):
+        """Clean shutdown — stop MCP, close logs."""
         self._shutdown_mcp()
         self.log.session_end()
         self.log.close()

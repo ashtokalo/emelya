@@ -43,7 +43,10 @@ _PASTE_END = "paste_end"
 MARKER_START = "\uE000"
 MARKER_END = "\uE001"
 
-_fd = sys.stdin.fileno()
+try:
+    _fd = sys.stdin.fileno()
+except Exception:
+    _fd = 0  # fallback for non-TTY environments (testing, piped input)
 
 
 # --- Low-level terminal I/O ---
