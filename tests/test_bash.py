@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from tools.bash import _strip_cd_prefix, _is_readonly
+from emelya.tools.bash import _strip_cd_prefix, _is_readonly
 
 
 class TestStripCdPrefix(unittest.TestCase):

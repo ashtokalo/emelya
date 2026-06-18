@@ -353,7 +353,7 @@ def execute(args: dict, ctx) -> str:
         return text
     except UnicodeDecodeError:
         # Binary — show hex dump
-        from tools.hex_read import _hex_dump
+        from emelya.tools.hex_read import _hex_dump
         preview = data[:256]
         dump = _hex_dump(preview)
         return f"[Binary content, {_format_size(len(data))}]\n{dump}"

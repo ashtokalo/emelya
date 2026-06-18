@@ -2,9 +2,17 @@
 
 import json
 
-from i18n import t
-from theme import C
-from llm import LLMClient, LLMError
+from emelya.i18n import t
+from emelya.theme import C
+from emelya.llm import LLMClient, LLMError
+
+
+def strip_model_suffix(name: str) -> str:
+    """Strip .gguf/.bin suffixes from model name for cleaner display."""
+    for suffix in (".gguf", ".bin"):
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+    return name
 
 
 class ModelMixin:
@@ -51,6 +59,11 @@ class ModelMixin:
             json.dumps(data, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        # Restrict permissions — file may contain API keys
+        try:
+            self._models_path.chmod(0o600)
+        except OSError:
+            pass
 
     def _get_client(self, model_name: str) -> LLMClient:
         """Get or create LLM client for a model by name. Cached."""
@@ -97,11 +110,7 @@ class ModelMixin:
                 # Update display name from response
                 mid = resp.get("model_id")
                 if mid:
-                    display = mid
-                    for suffix in (".gguf", ".bin"):
-                        if display.endswith(suffix):
-                            display = display[:-len(suffix)]
-                    self._model_display = display
+                    self._model_display = strip_model_suffix(mid)
                 return resp
             except Exception as e:
                 last_err = e
@@ -188,11 +197,7 @@ class ModelMixin:
         # From check_connection: "models: Qwen3.5-4B-Q5_K_M.gguf"
         if info.startswith("models: "):
             name = info[8:].split(",")[0].strip()
-            # Strip common suffixes for cleaner display
-            for suffix in (".gguf", ".bin"):
-                if name.endswith(suffix):
-                    name = name[:-len(suffix)]
-            self._model_display = name
+            self._model_display = strip_model_suffix(name)
 
     def _list_models(self):
         for name, cfg in self._models.items():

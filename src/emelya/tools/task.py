@@ -42,7 +42,7 @@ def get_tasks():
 
 def execute(args: dict, ctx) -> str:
     try:
-        from theme import C
+        from emelya.theme import C
     except ImportError:
         class C:
             info = success = warning = muted = reset = ""

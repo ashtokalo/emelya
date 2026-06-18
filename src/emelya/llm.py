@@ -455,15 +455,19 @@ class LLMClient:
 
     @staticmethod
     def _dump_failed_request(data: dict, error: str):
-        """Dump failed request to /tmp for debugging."""
-        import os
+        """Dump failed request summary to /tmp for debugging.
+        Only metadata is saved — no full message content (may contain secrets)."""
         from pathlib import Path
         dump_dir = Path("/tmp/emelya_debug")
-        dump_dir.mkdir(exist_ok=True)
+        dump_dir.mkdir(exist_ok=True, mode=0o700)
         ts = time.strftime("%H%M%S")
         dump_path = dump_dir / f"request_{ts}.json"
         try:
-            # Summarize messages to avoid huge dumps
+            # Rotate — keep max 20 files
+            existing = sorted(dump_dir.glob("request_*.json"))
+            for old in existing[:-19]:
+                old.unlink(missing_ok=True)
+
             summary = {
                 "error": error,
                 "model": data.get("model"),
@@ -482,14 +486,8 @@ class LLMClient:
                     entry["tool_calls"] = tc
                 if tid:
                     entry["tool_call_id"] = tid
-                # Include first/last messages in full
-                if role in ("system",) or len(summary["messages"]) < 2:
-                    entry["content_preview"] = (m.get("content") or "")[:200]
                 summary["messages"].append(entry)
-            # Also dump full request for detailed analysis
             dump_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-            full_path = dump_dir / f"request_{ts}_full.json"
-            full_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
 

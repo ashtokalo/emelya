@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from context import Context
+from emelya.context import Context
 
 
 class TestContext(unittest.TestCase):

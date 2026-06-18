@@ -4,13 +4,13 @@
 import sys
 from pathlib import Path
 
-# Ensure src/ is in Python path
-src_dir = Path(__file__).parent
+# Ensure src/ is in Python path (for both direct run and package install)
+src_dir = Path(__file__).parent.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from config import parse_args
-from repl import REPL
+from emelya.config import parse_args
+from emelya.repl import REPL
 
 
 def main():

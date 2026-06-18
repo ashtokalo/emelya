@@ -69,6 +69,8 @@ _STRINGS = {
         "refreshed": "refreshed",
         "messages": "messages",
         "tokens": "tokens",
+        "context_warning": "Context is {pct}% full ({tokens}/{limit} tokens)",
+        "compact_prompt": "Compact (y), clear (c), or continue (Enter)?",
     },
     "ru": {
         "you": "Вы",
@@ -135,6 +137,8 @@ _STRINGS = {
         "refreshed": "обновлено",
         "messages": "сообщений",
         "tokens": "токенов",
+        "context_warning": "Контекст заполнен на {pct}% ({tokens}/{limit} токенов)",
+        "compact_prompt": "Сжать (д), очистить (о) или продолжить (Enter)?",
     },
 }
 

@@ -6,7 +6,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from sandbox import Sandbox
+from emelya.sandbox import Sandbox
+
+
+def is_binary(path, check_bytes=8192):
+    """Check if file is binary by looking for null bytes."""
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" in f.read(check_bytes)
+    except OSError:
+        return False
 
 
 @dataclass
@@ -79,17 +88,18 @@ class ToolRegistry:
             self._extensions[category][name] = entry
 
     def load_builtin(self, src_dir: Path):
-        """Load all built-in tool modules from src/tools/."""
+        """Load all built-in tool modules from src/emelya/tools/."""
         import sys
         tools_dir = src_dir / "tools"
-        src_str = str(src_dir)
-        if src_str not in sys.path:
-            sys.path.insert(0, src_str)
+        # Ensure parent of emelya package is on path
+        pkg_parent = str(src_dir.parent)
+        if pkg_parent not in sys.path:
+            sys.path.insert(0, pkg_parent)
 
         for py_file in sorted(tools_dir.glob("*.py")):
             if py_file.name == "__init__.py":
                 continue
-            module_name = f"tools.{py_file.stem}"
+            module_name = f"emelya.tools.{py_file.stem}"
             try:
                 module = importlib.import_module(module_name)
                 if hasattr(module, "DEFINITION") and hasattr(module, "execute"):
@@ -147,7 +157,7 @@ class ToolRegistry:
         """Execute a tool call, return result string."""
         # Block write tools in plan mode
         try:
-            from tools.plan_mode import is_active, BLOCKED_TOOLS
+            from emelya.tools.plan_mode import is_active, BLOCKED_TOOLS
             if is_active() and name in BLOCKED_TOOLS:
                 return f"Error: '{name}' is blocked in plan mode. Use plan_mode(action='exit', plan='...') first."
         except ImportError:

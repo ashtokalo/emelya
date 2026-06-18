@@ -3,10 +3,10 @@
 import json
 from datetime import datetime
 
-from i18n import t
-from theme import C
-from log import SessionLog, UsageTracker, collect_stats
-from input_history import InputHistory
+from emelya.i18n import t
+from emelya.theme import C
+from emelya.log import SessionLog, UsageTracker, collect_stats
+from emelya.input_history import InputHistory
 
 
 class CommandsMixin:
@@ -243,7 +243,7 @@ class CommandsMixin:
     def _cmd_skill(self, arg: str = ""):
         """Load a skill and inject into current context as user instruction."""
         if not arg:
-            from tools.skill import scan_skills
+            from emelya.tools.skill import scan_skills
             skills = scan_skills(self.skills_dir)
             if skills:
                 print(f"  {t('available')}:")
@@ -268,7 +268,7 @@ class CommandsMixin:
     def _cmd_agent(self, arg: str = ""):
         """Run an agent directly from command line."""
         if not arg:
-            from tools.agent import scan_agents
+            from emelya.tools.agent import scan_agents
             agents = scan_agents(self.agents_dir)
             if agents:
                 print(f"  {t('available')}:")

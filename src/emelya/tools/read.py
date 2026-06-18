@@ -1,5 +1,7 @@
 """Read tool — read text files with line numbers."""
 
+from emelya.tools import is_binary
+
 DEFINITION = {
     "type": "function",
     "function": {
@@ -27,16 +29,6 @@ DEFINITION = {
 }
 
 
-def _is_binary(path, check_bytes=8192):
-    """Check if file is binary by looking for null bytes."""
-    try:
-        with open(path, "rb") as f:
-            chunk = f.read(check_bytes)
-            return b"\x00" in chunk
-    except OSError:
-        return False
-
-
 def execute(args: dict, ctx) -> str:
     path = ctx.sandbox.validate(args["path"])
 
@@ -48,7 +40,7 @@ def execute(args: dict, ctx) -> str:
     if path.is_dir():
         return f"Error: '{args['path']}' is a directory, not a file"
 
-    if _is_binary(path):
+    if is_binary(path):
         return (
             f"Error: '{args['path']}' is a binary file. "
             "Use bash with xxd or hexdump to inspect binary content."

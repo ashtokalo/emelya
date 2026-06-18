@@ -4,7 +4,7 @@ Uses basic ANSI codes (works in all modern terminals).
 Respects NO_COLOR env variable.
 
 Usage:
-    from theme import C
+    from emelya.theme import C
     print(f"{C.user}You:{C.reset} text")
 """
 

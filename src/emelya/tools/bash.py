@@ -125,12 +125,13 @@ def _strip_cd_prefix(command: str, work_dir: str) -> str:
 def _is_readonly(command: str) -> bool:
     """Check if command is read-only (safe to auto-approve)."""
     cmd = command.strip()
-    # Handle pipes/subshells — check first command
+    # Block command chaining, substitution, and redirects BEFORE pipe split
+    # Check the full command for dangerous patterns
+    if any(c in cmd for c in (">", "<", "`", "$(", ";")) or "&&" in cmd or "||" in cmd:
+        return False
+    # Handle pipes — check first command
     # "git log | head" is readonly, "rm -f x | echo done" is not
     first_cmd = cmd.split("|")[0].strip() if "|" in cmd else cmd
-    # Handle command substitution and redirects — not readonly
-    if any(c in first_cmd for c in (">", "<", "`", "$(")):
-        return False
     for ro in READONLY_COMMANDS:
         if first_cmd == ro or first_cmd.startswith(ro + " "):
             return True

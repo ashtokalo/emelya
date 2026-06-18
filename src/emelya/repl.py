@@ -8,22 +8,22 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from config import Config
-from i18n import t
-from theme import C
-from context import Context
-from input_history import InputHistory
-from line_editor import LineEditor, strip_markers
-from llm import LLMClient, LLMError
-from log import SessionLog, UsageTracker
-from sandbox import Sandbox
-from tools import ToolContext, ToolRegistry
-from tools.skill import scan_skills
-from tools.agent import scan_agents
+from emelya.config import Config
+from emelya.i18n import t
+from emelya.theme import C
+from emelya.context import Context
+from emelya.input_history import InputHistory
+from emelya.line_editor import LineEditor, strip_markers
+from emelya.llm import LLMClient, LLMError
+from emelya.log import SessionLog, UsageTracker
+from emelya.sandbox import Sandbox
+from emelya.tools import ToolContext, ToolRegistry
+from emelya.tools.skill import scan_skills
+from emelya.tools.agent import scan_agents
 
-from models import ModelMixin
-from mcp_manager import MCPMixin
-from commands import CommandsMixin
+from emelya.models import ModelMixin
+from emelya.mcp_manager import MCPMixin
+from emelya.commands import CommandsMixin
 
 
 class _WaitSpinner:
@@ -84,8 +84,8 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         self.sandbox = Sandbox(config.work_dir)
         self.registry = ToolRegistry()
 
-        src_dir = Path(__file__).parent
-        self.app_dir = src_dir.parent  # emelya/ root
+        src_dir = Path(__file__).parent          # src/emelya/
+        self.app_dir = src_dir.parent.parent    # project root
         self.skills_dir = self.app_dir / "skills"
         self.agents_dir = self.app_dir / "agents"
         self.sessions_dir = config.work_dir / ".emelya" / "sessions"
@@ -348,12 +348,8 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         # Update display name from every API response
         mid = response.get("model_id")
         if mid:
-            # Strip .gguf/.bin for display
-            display = mid
-            for suffix in (".gguf", ".bin"):
-                if display.endswith(suffix):
-                    display = display[:-len(suffix)]
-            self._model_display = display
+            from emelya.models import strip_model_suffix
+            self._model_display = strip_model_suffix(mid)
 
         model_name = mid or self._model_display
         usage = response.get("usage")
@@ -432,13 +428,12 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                     consecutive_errors += 1
                     continue
 
-                import time as _time
-                t0 = _time.monotonic()
+                t0 = time.monotonic()
                 try:
                     result = self.registry.execute(tc["name"], tc["args"], self.tool_ctx)
                 except KeyboardInterrupt:
                     result = "Cancelled by user"
-                elapsed = int((_time.monotonic() - t0) * 1000)
+                elapsed = int((time.monotonic() - t0) * 1000)
 
                 self.log.tool_exec(tc["name"], tc["args"], result, elapsed)
 
@@ -447,11 +442,11 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                     try:
                         answer = input(f"\n  {C.warning}{t('allow')}{C.reset} ").strip().lower()
                         if answer not in ("y", "yes", "д", "да"):
-                            from tools.plan_mode import reset as plan_reset
+                            from emelya.tools.plan_mode import reset as plan_reset
                             plan_reset()
                             result = "Plan rejected by user. Ask what to change."
                     except (EOFError, KeyboardInterrupt):
-                        from tools.plan_mode import reset as plan_reset
+                        from emelya.tools.plan_mode import reset as plan_reset
                         plan_reset()
                         result = "Plan rejected."
 
@@ -660,6 +655,31 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         except Exception:
             pass
 
+    def _check_context_budget(self) -> bool:
+        """Check if context exceeds 75% of limit. If so, offer to compact.
+        Returns True if user chose to compact/clear (caller should re-prompt)."""
+        tokens = self.context.estimate_tokens()
+        threshold = int(self.context.context_limit * 0.75)
+        if tokens < threshold or not self.context.messages:
+            return False
+
+        pct = int(tokens / self.context.context_limit * 100)
+        print(f"\n  {C.warning}{t('context_warning', pct=pct, tokens=tokens, limit=self.context.context_limit)}{C.reset}")
+        try:
+            answer = input(f"  {t('compact_prompt')}: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+        if answer in ("y", "yes", "д", "да", "1", "/compact"):
+            # Run compact
+            self._handle_command("/compact")
+            return True
+        if answer in ("c", "clear", "о", "очистить", "2", "/clear"):
+            self._handle_command("/clear")
+            return True
+        # User declined — proceed with the request
+        return False
+
     # --- Main entry point ---
 
     def run(self):
@@ -733,6 +753,10 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                     print(f"  {t('unknown_cmd')}: {cmd}")
                     print("  Available: /help /clear /compact /undo /drop /save /load /new /model /skill /agent /tools /mcp /stats /context /history /exit")
                 continue
+
+            # Check context budget before sending to model
+            if self._check_context_budget():
+                continue  # user chose to compact or clear, re-prompt
 
             # Agent loop
             try:

@@ -2,9 +2,9 @@
 
 import json
 
-from i18n import t
-from theme import C
-from mcp import MCPClient, MCPError, compact_tool_description, load_mcp_config, load_cache, save_cache
+from emelya.i18n import t
+from emelya.theme import C
+from emelya.mcp import MCPClient, MCPError, compact_tool_description, load_mcp_config, load_cache, save_cache
 
 
 class MCPMixin:

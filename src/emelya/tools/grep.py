@@ -42,15 +42,9 @@ DEFINITION = {
     },
 }
 
+from emelya.tools import is_binary
+
 EXCLUDED_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
-
-
-def _is_binary(path, check_bytes=8192):
-    try:
-        with open(path, "rb") as f:
-            return b"\x00" in f.read(check_bytes)
-    except OSError:
-        return True
 
 
 def _collect_files(base: Path, include: str = None) -> list:
@@ -102,7 +96,7 @@ def execute(args: dict, ctx) -> str:
     total_matches = 0
 
     for fpath in files:
-        if _is_binary(fpath):
+        if is_binary(fpath):
             continue
         try:
             text = fpath.read_text(encoding="utf-8", errors="replace")

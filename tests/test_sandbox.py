@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from sandbox import Sandbox
+from emelya.sandbox import Sandbox
 
 
 class TestSandbox(unittest.TestCase):

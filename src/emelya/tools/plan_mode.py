@@ -51,7 +51,7 @@ def execute(args: dict, ctx) -> str:
     global _in_plan_mode, _plan_text
 
     try:
-        from theme import C
+        from emelya.theme import C
     except ImportError:
         class C:
             info = warning = muted = reset = ""

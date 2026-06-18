@@ -131,12 +131,12 @@ def execute(args: dict, ctx) -> str:
     # Special handling for planner — collect plan_steps
     is_planner = name == "planner"
     if is_planner:
-        from tools.plan_step import reset as plan_reset, get_steps
+        from emelya.tools.plan_step import reset as plan_reset, get_steps
         plan_reset()
 
     depth_str = f" (depth {next_depth})" if next_depth > 1 else ""
     try:
-        from theme import C as _C
+        from emelya.theme import C as _C
         print(f"\n  {_C.tool_call}[agent: {name}{depth_str}]{_C.reset} {_C.muted}Running...{_C.reset}", flush=True)
     except ImportError:
         print(f"\n  [agent: {name}{depth_str}] Running...", flush=True)
@@ -165,10 +165,10 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
     """Run isolated agent loop with progress output and routing support."""
     import sys
     import time
-    from tools import ToolContext
+    from emelya.tools import ToolContext
 
     try:
-        from theme import C as _C
+        from emelya.theme import C as _C
     except ImportError:
         class _C:
             tool_call = muted = tool_result = tool_error = reset = ""
@@ -334,7 +334,7 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         "content": "Step limit reached. Provide your answer based on what you have found so far.",
     })
     try:
-        response = ctx.llm_client.chat(
+        response = llm_client.chat(
             messages=messages,
             tools=None,
             temperature=ctx.config.temperature if ctx.config else 0.7,
@@ -342,9 +342,8 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         )
         _usage = response.get("usage")
         _model = response.get("model_id") or (llm_client.model if llm_client else None)
-        _log = ctx.session_log
-        if _log:
-            _log.response(
+        if ctx.session_log:
+            ctx.session_log.response(
                 response.get("content"), None,
                 usage=_usage, model=_model,
             )

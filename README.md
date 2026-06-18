@@ -46,18 +46,17 @@ Configure models in `models.json`:
 
 ```json
 {
-  "local": {
-    "host": "localhost",
-    "port": 8080
-  },
-  "deepseek": {
-    "host": "api.deepseek.com",
-    "api_key": "sk-..."
-  },
-  "openrouter": {
-    "host": "openrouter.ai",
-    "api_key": "sk-or-...",
-    "model": "anthropic/claude-3.5-sonnet"
+  "models": {
+    "deepseek": {
+      "base_url": "https://api.deepseek.com",
+      "model": "deepseek-chat",
+      "api_key": "sk-..."
+    },
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api",
+      "model": "anthropic/claude-3.5-sonnet",
+      "api_key": "sk-or-..."
+    }
   },
   "routing": {
     "default": ["local"],
@@ -67,6 +66,8 @@ Configure models in `models.json`:
   }
 }
 ```
+
+The `local` model is always available (configured via CLI args `--host`/`--port`). File is stored at `.emelya/models.json`.
 
 Switch models at runtime with `/model` command or at startup with `--use NAME`.
 
@@ -217,20 +218,24 @@ Instructions loaded into context on demand. Model decides when to load them.
 | `--max-tokens` | 8192 | Max tokens per response (per-model override in models.json) |
 | `--context-limit` | 8000 | Context window budget (auto-detected from llama.cpp `/props`) |
 | `--work-dir` | . | Working directory (sandbox root) |
-| `--max-iterations` | 20 | Max tool-call iterations per query |
+| `--max-iterations` | 10 | Max tool-call iterations per query |
 | `--no-stream` | | Disable streaming |
 | `--confirm` | all | Bash confirm mode: all, write, none |
 
 ## Architecture
 
 ```
-src/                          — ~6700 lines Python, stdlib only
+src/emelya/                   — Python package, ~9700 lines, stdlib only
+├── __init__.py               — package init, version
 ├── __main__.py               — entry point
 ├── config.py                 — CLI args
-├── repl.py                   — REPL + agent loop + session management
-├── llm.py                    — HTTP client (urllib) with streaming, SSL error recovery
+├── repl.py                   — REPL + agent loop
+├── models.py                 — multi-model management, routing, failover
+├── mcp_manager.py            — MCP server lifecycle, /mcp commands
+├── commands.py               — /command handling, session management, UI
+├── llm.py                    — HTTP client (urllib) with streaming, native format parsing
 ├── context.py                — message history, trimming, save/load
-├── sandbox.py                — path validation
+├── sandbox.py                — path validation, suggest_path
 ├── log.py                    — detailed session logging
 ├── mcp.py                    — MCP client (stdio JSON-RPC)
 ├── i18n.py                   — internationalization (ru/en)
@@ -248,7 +253,7 @@ src/                          — ~6700 lines Python, stdlib only
     ├── archive.py                        (ext: archives)
     └── plan_step.py                      (ext: planning)
 
-models.json                   — multi-model configuration
+.emelya/models.json           — multi-model configuration (per-project)
 prompts/system.md             — system prompt template
 skills/*.md                   — 15 skill files
 agents/*.md                   — 16 agent templates
@@ -265,7 +270,7 @@ The agent uses **work context isolation**: when the model calls tools, the tool 
 live in a temporary work context. Only the user message and final text response are saved to the
 main context. This is critical for small models with 8-32K context windows.
 
-Work context is bounded by `--max-iterations` (default 20). Progressive nudges warn the model
+Work context is bounded by `--max-iterations` (default 10). Progressive nudges warn the model
 when iterations are running out, and the last step forces a final answer.
 
 ### Token Budget (typical 8K model)

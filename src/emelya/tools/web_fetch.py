@@ -81,6 +81,38 @@ def _html_to_text(html: str) -> str:
     return extractor.get_text()
 
 
+_BLOCKED_NETWORKS = None
+
+def _is_private_url(url: str) -> bool:
+    """Check if URL points to a dangerous internal IP (SSRF protection).
+    Blocks loopback, link-local, and RFC 1918 private ranges.
+    Does NOT block all is_private (too broad — catches benchmarking ranges etc.)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    global _BLOCKED_NETWORKS
+    if _BLOCKED_NETWORKS is None:
+        _BLOCKED_NETWORKS = [
+            ipaddress.ip_network("127.0.0.0/8"),       # loopback
+            ipaddress.ip_network("10.0.0.0/8"),         # RFC 1918
+            ipaddress.ip_network("172.16.0.0/12"),      # RFC 1918
+            ipaddress.ip_network("192.168.0.0/16"),     # RFC 1918
+            ipaddress.ip_network("169.254.0.0/16"),     # link-local (AWS metadata)
+            ipaddress.ip_network("::1/128"),             # IPv6 loopback
+            ipaddress.ip_network("fc00::/7"),            # IPv6 ULA
+            ipaddress.ip_network("fe80::/10"),           # IPv6 link-local
+        ]
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
+        ip_str = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)[0][4][0]
+        ip = ipaddress.ip_address(ip_str)
+        return any(ip in net for net in _BLOCKED_NETWORKS)
+    except (socket.gaierror, ValueError, OSError, IndexError):
+        return False
+
+
 def execute(args: dict, ctx) -> str:
     url = args.get("url", "")
     max_length = args.get("max_length", DEFAULT_MAX_LENGTH)
@@ -90,6 +122,13 @@ def execute(args: dict, ctx) -> str:
 
     if not url.startswith(("http://", "https://")):
         return "Error: url must start with http:// or https://"
+
+    # SSRF protection — block private/internal IPs
+    if _is_private_url(url):
+        return (
+            "Error: URL points to a private/internal address. "
+            "web_fetch only allows public URLs. Use bash with curl for internal services."
+        )
 
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
 
