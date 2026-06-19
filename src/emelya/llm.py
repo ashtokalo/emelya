@@ -404,26 +404,30 @@ class LLMClient:
                 tool_calls = self._parse_tool_calls(msg["tool_calls"]) if msg.get("tool_calls") else None
 
                 # Native format fallback: some models output tool calls
-                # in their native format instead of OpenAI function calling
-                if not tool_calls and content and tools:
-                    native_calls = self._validate_native_calls(
-                        self._parse_native_tool_calls(content), tools,
-                    )
-                    if native_calls:
-                        tool_calls = native_calls
+                # in their native format instead of OpenAI function calling.
+                # Always strip markers from content; convert to tool_calls only if tools were provided.
+                if not tool_calls and content:
+                    raw_native = self._parse_native_tool_calls(content)
+                    if raw_native:
+                        # Always clean content — remove DSML/Qwen/etc markers
                         content = self._strip_native_markers(content)
                         msg = {"role": "assistant", "content": content}
-                        msg["tool_calls"] = [
-                            {
-                                "id": tc["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tc["name"],
-                                    "arguments": json.dumps(tc["args"]),
-                                },
-                            }
-                            for tc in tool_calls
-                        ]
+                        # Only convert to tool_calls if tools were available
+                        if tools:
+                            native_calls = self._validate_native_calls(raw_native, tools)
+                            if native_calls:
+                                tool_calls = native_calls
+                                msg["tool_calls"] = [
+                                    {
+                                        "id": tc["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": tc["name"],
+                                            "arguments": json.dumps(tc["args"]),
+                                        },
+                                    }
+                                    for tc in tool_calls
+                                ]
 
                 return {
                     "content": content,
@@ -536,13 +540,14 @@ class LLMClient:
                     parsed_tc = finalized
 
                 # Native format fallback for streaming
-                if not parsed_tc and content and tools:
-                    native_calls = self._validate_native_calls(
-                        self._parse_native_tool_calls(content), tools,
-                    )
-                    if native_calls:
-                        parsed_tc = native_calls
+                if not parsed_tc and content:
+                    raw_native = self._parse_native_tool_calls(content)
+                    if raw_native:
                         content = self._strip_native_markers(content)
+                        if tools:
+                            native_calls = self._validate_native_calls(raw_native, tools)
+                            if native_calls:
+                                parsed_tc = native_calls
 
                 raw = {"role": "assistant", "content": content or None}
                 if parsed_tc:

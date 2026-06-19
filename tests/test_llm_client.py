@@ -172,13 +172,13 @@ class TestLLMClient(unittest.TestCase):
         # Content should be stripped of tool_call markers
         self.assertEqual(result["content"], "Let me search.")
 
-    def test_native_format_not_triggered_without_tools(self):
-        """Native format should not be parsed when tools=None."""
+    def test_native_format_stripped_but_no_tool_calls_without_tools(self):
+        """Native markers stripped from content, but tool_calls stays None when tools=None."""
         _MockHandler.response_body = {
             "choices": [{
                 "message": {
                     "role": "assistant",
-                    "content": '<tool_call>{"name": "grep", "arguments": {}}</tool_call>',
+                    "content": 'Some text\n<tool_call>{"name": "grep", "arguments": {}}</tool_call>',
                 }
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
@@ -187,9 +187,11 @@ class TestLLMClient(unittest.TestCase):
             messages=[{"role": "user", "content": "hi"}],
             tools=None,
         )
-        # Should be treated as plain text, not parsed
+        # tool_calls should remain None (tools not provided)
         self.assertIsNone(result["tool_calls"])
-        self.assertIn("<tool_call>", result["content"])
+        # But markers should be stripped from content
+        self.assertNotIn("<tool_call>", result["content"] or "")
+        self.assertEqual(result["content"], "Some text")
 
     def test_json_repair_in_tool_args(self):
         """Truncated JSON in tool arguments should be repaired."""

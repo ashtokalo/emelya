@@ -262,6 +262,14 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             if include:
                 pattern = f"{pattern} ({include})"
             print(f"\n  {C.tool_call}● {t('tool_grep', pattern=pattern)}{C.reset}")
+        elif name == "list_dir":
+            print(f"\n  {C.tool_call}● {t('tool_list_dir', path=self._short_path(args.get('path', '.')))}{C.reset}")
+        elif name == "web_fetch":
+            print(f"\n  {C.tool_call}● {t('tool_web_fetch', url=args.get('url', ''))}{C.reset}")
+        elif name == "web_search":
+            print(f"\n  {C.tool_call}● {t('tool_web_search', query=args.get('query', ''))}{C.reset}")
+        elif name == "load_tools":
+            print(f"\n  {C.tool_call}● {t('tool_load_tools', category=args.get('category', ''))}{C.reset}")
         elif name == "skill":
             print(f"\n  {C.tool_call}● {t('tool_skill', name=args.get('name', ''))}{C.reset}")
         elif name == "agent":
