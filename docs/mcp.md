@@ -3,8 +3,12 @@
 ## Обзор
 
 MCP (Model Context Protocol) — стандарт для подключения внешних инструментов к LLM.
-Emelya поддерживает MCP-серверы через stdio transport: сервер запускается как дочерний
-процесс, взаимодействие идёт через stdin/stdout.
+Emelya поддерживает два транспорта:
+
+- **stdio** — сервер запускается как дочерний процесс, обмен через stdin/stdout (JSON-RPC 2.0)
+- **HTTP** — прямые POST-запросы к удалённому MCP-серверу (MCP Streamable HTTP, RFC 2025-03-26)
+
+Транспорт выбирается автоматически по конфигурации: наличие `url` → HTTP, наличие `command` → stdio.
 
 Инструменты MCP-сервера появляются в модели как обычные tools и вызываются ею
 так же, как встроенные инструменты (read, bash, etc.).
@@ -13,7 +17,7 @@ Emelya поддерживает MCP-серверы через stdio transport: �
 
 ## Конфигурационный файл
 
-### Формат
+### Формат — stdio-сервер (локальный процесс)
 
 ```json
 {
@@ -30,16 +34,43 @@ Emelya поддерживает MCP-серверы через stdio transport: �
 }
 ```
 
-### Поля сервера
-
 | Поле | Тип | Обязательное | Описание |
 |------|-----|-------------|----------|
 | `command` | string | да | Исполняемый файл или команда |
 | `args` | array | нет | Аргументы командной строки |
 | `env` | object | нет | Дополнительные переменные окружения |
-| `description` | string | нет | Описание для отображения в `/mcp` и tool definition |
+| `timeout` | integer | нет | Таймаут запросов в секундах (default: 30) |
+| `description` | string | нет | Описание для `/mcp` и tool definition |
 
-### Пример
+### Формат — HTTP-сервер (удалённый API)
+
+```json
+{
+  "servers": {
+    "имя_сервера": {
+      "url": "https://example.com/mcp",
+      "headers": {
+        "X-Auth-Token": "секрет",
+        "Authorization": "Bearer token"
+      },
+      "timeout": 30,
+      "description": "Описание (необязательно)"
+    }
+  }
+}
+```
+
+| Поле | Тип | Обязательное | Описание |
+|------|-----|-------------|----------|
+| `url` | string | да | URL MCP-эндпоинта |
+| `headers` | object | нет | HTTP-заголовки (аутентификация и т.п.) |
+| `timeout` | integer | нет | Таймаут запросов в секундах (default: 30) |
+| `description` | string | нет | Описание для `/mcp` и tool definition |
+
+HTTP-транспорт работает полностью без внешних зависимостей — только стандартная библиотека Python.
+Каждый вызов инструмента — отдельный POST-запрос. Сессий и постоянного соединения нет.
+
+### Пример с обоими транспортами
 
 ```json
 {
@@ -49,16 +80,17 @@ Emelya поддерживает MCP-серверы через stdio transport: �
       "args": ["-y", "@playwright/mcp@latest"],
       "description": "Browser automation"
     },
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"]
-    },
     "myapi": {
       "command": "python3",
       "args": ["/path/to/server.py"],
       "env": {
-        "API_KEY": "secret",
-        "BASE_URL": "https://api.example.com"
+        "API_KEY": "secret"
+      }
+    },
+    "shopfans": {
+      "url": "https://app.shopfans.com/admin/api/mcp",
+      "headers": {
+        "X-Auth-Token": "l_JL-..."
       }
     }
   }
@@ -141,14 +173,42 @@ MCP-серверы настраиваются на двух уровнях:
 
 Добавляет сервер, подключается, кэширует инструменты и сохраняет в `.emelya/mcp.json`.
 
+**stdio-сервер** — разделитель `--` перед командой:
 ```
-/mcp add playwright npx -y @playwright/mcp@latest
-/mcp add myserver python3 /path/to/server.py
-/mcp add remote npx mcp-remote https://example.com/mcp
-/mcp add gemini node server.mjs --env GEMINI_API_KEY=xxx
+/mcp add playwright -- npx -y @playwright/mcp@latest
+/mcp add myserver -- python3 /path/to/server.py
+/mcp add gemini -- node server.mjs
 ```
 
-Опция `--env KEY=VALUE` задаёт переменные окружения и поддерживается многократно.
+**HTTP-сервер** — URL начинается с `http://` или `https://`, опционально заголовки `KEY=VALUE`:
+```
+/mcp add shopfans https://example.com/mcp X-Auth-Token=secret
+/mcp add remote https://api.example.com/mcp Authorization=Bearer\ token
+```
+
+Из CLI работает аналогично:
+```
+emelya mcp add playwright -- npx -y @playwright/mcp@latest
+emelya mcp add shopfans https://example.com/mcp X-Auth-Token=secret
+emelya --work-dir /my/project mcp add myserver -- python3 server.py
+```
+
+### `emelya mcp list`
+
+Показывает список всех настроенных MCP-серверов (глобальных и локальных) без запуска REPL:
+
+```
+emelya mcp list
+
+  playwright  [stdio, local]  24 tools
+    npx
+  shopfans  [http, global]  7 tools
+    https://example.com/mcp
+  telegram  [stdio, local]  not cached
+    telemcp
+```
+
+Выводит транспорт (`stdio`/`http`), источник (`global`/`local`), количество инструментов из кэша и endpoint/команду.
 
 ### `/mcp tools <name>`
 
@@ -208,13 +268,20 @@ MCP-серверы настраиваются на двух уровнях:
       "command": "npx",
       "args": ["-y", "@playwright/mcp@latest"],
       "description": "Browser automation"
+    },
+    "myapi": {
+      "url": "https://api.example.com/mcp",
+      "headers": {
+        "X-Auth-Token": "secret"
+      }
     }
   }
 }
 ```
 
-После этого сервер будет доступен во всех проектах. Команда `/mcp add` всегда
+После этого серверы будут доступны во всех проектах. Команда `/mcp add` всегда
 сохраняет в локальный `.emelya/mcp.json` — для глобального редактируйте вручную.
+HTTP-серверы через `/mcp add` пока не поддерживаются (добавляйте вручную).
 
 ---
 

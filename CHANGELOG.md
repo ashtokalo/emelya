@@ -21,6 +21,15 @@ All notable changes to this project will be documented in this file.
   - **Chain behaviour** — when multiple hooks are registered for an event, each hook receives the state already modified by previous hooks: `command` and `result` substitutions propagate through the chain. A `block=true` from any hook stops the chain immediately.
   - **Tools filter** — each hook entry accepts an optional `"tools": [...]` list to run only for specific tool names.
 - **38 new tests** — full coverage of `HookResult`, `HookRunner` (load/merge, all three hook types), chain behaviour, and bash/write/edit tool integrations.
+- **HTTP MCP transport** — `HTTPMCPClient` for direct HTTPS connections to MCP Streamable HTTP servers (protocol version `2025-03-26`). Fully stateless: one POST per call, no subprocess, pure stdlib. Transport is selected automatically: `url` → HTTP, `command` → stdio.
+- **New `/mcp add` syntax** — `--` separator for stdio (`/mcp add name -- npx server`), URL prefix for HTTP (`/mcp add name https://... KEY=VALUE`). Replaces the old positional syntax.
+- **CLI `mcp` subcommands** — `emelya mcp` can now be used without starting the REPL:
+  - `emelya mcp list` — list all configured servers (global + local) with transport, source, and cached tool count.
+  - `emelya mcp add <name> -- <cmd>` / `emelya mcp add <name> <url> [KEY=VALUE ...]` — add a server, connect, and cache tools.
+  - `emelya mcp remove <name>` — remove a server from local config and cache.
+  - `emelya mcp call <server> <tool> [args]` — call an MCP tool directly; plain text auto-mapped to first parameter from schema; status messages go to stderr, result to stdout (pipe-friendly).
+  - `emelya mcp help` / `emelya mcp --help` / `emelya mcp` — usage reference.
+  - All subcommands respect `--work-dir`.
 
 ## [0.5.1] - 2026-06-22
 

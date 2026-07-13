@@ -5,7 +5,122 @@ from pathlib import Path
 
 from emelya.i18n import t
 from emelya.theme import C
-from emelya.mcp import MCPClient, MCPError, compact_tool_description, load_mcp_config, load_cache, save_cache
+from emelya.mcp import MCPClient, HTTPMCPClient, MCPError, compact_tool_description, load_mcp_config, load_cache, save_cache
+
+
+def _parse_mcp_add_args(parts: list) -> tuple:
+    """Parse 'mcp add' arguments. Returns (name, config_entry). Raises ValueError."""
+    if not parts:
+        raise ValueError("need at least a name")
+
+    name = parts[0]
+    rest = parts[1:]
+
+    if not rest:
+        raise ValueError("need a command (use -- before it) or an HTTP/HTTPS URL")
+
+    if rest[0].startswith(("http://", "https://")):
+        # HTTP transport: NAME URL [KEY=VALUE ...]
+        url = rest[0]
+        headers = {}
+        for kv in rest[1:]:
+            if "=" not in kv:
+                raise ValueError(f"expected KEY=VALUE for header, got: {kv!r}")
+            k, v = kv.split("=", 1)
+            headers[k] = v
+        entry = {"url": url}
+        if headers:
+            entry["headers"] = headers
+    elif "--" in rest:
+        # stdio transport: NAME -- CMD [ARGS]
+        sep = rest.index("--")
+        cmd_parts = rest[sep + 1:]
+        if not cmd_parts:
+            raise ValueError("no command after --")
+        command = cmd_parts[0]
+        args = cmd_parts[1:]
+        entry = {"command": command}
+        if args:
+            entry["args"] = args
+    else:
+        raise ValueError(
+            "use -- before stdio command (e.g. 'name -- npx server') "
+            "or provide an HTTP/HTTPS URL"
+        )
+
+    return name, entry
+
+
+def _make_mcp_client(name: str, entry: dict, work_dir: str = None):
+    """Create MCPClient or HTTPMCPClient based on entry config."""
+    if entry.get("url"):
+        return HTTPMCPClient(
+            name=name,
+            url=entry["url"],
+            headers=entry.get("headers", {}),
+            timeout=entry.get("timeout", 30),
+        )
+    elif entry.get("command"):
+        return MCPClient(
+            name=name,
+            command=entry["command"],
+            args=entry.get("args", []),
+            env=entry.get("env") or None,
+            work_dir=work_dir,
+        )
+    else:
+        raise MCPError(f"Server '{name}' has neither 'url' nor 'command'")
+
+
+def format_mcp_result(result: str) -> str:
+    """Format MCP result for display. Pretty-print JSON if compact enough."""
+    try:
+        data = json.loads(result)
+    except (json.JSONDecodeError, ValueError):
+        return result
+    pretty = json.dumps(data, indent=2, ensure_ascii=False)
+    if pretty.count("\n") <= 100:
+        return pretty
+    return json.dumps(data, ensure_ascii=False)
+
+
+def parse_mcp_call_args(args_str: str, tool_def: dict) -> dict:
+    """Parse call args string using tool schema.
+
+    - JSON object string → parsed as-is
+    - Plain text → assigned to first required (or first) parameter
+    - Empty → {}
+    Returns (call_kwargs, hint) where hint describes auto-mapping (may be empty).
+    """
+    if not args_str:
+        return {}, ""
+
+    if args_str.startswith("{"):
+        try:
+            return json.loads(args_str), ""
+        except json.JSONDecodeError as e:
+            raise ValueError(f"invalid JSON: {e}") from e
+
+    # Plain text → first param from schema
+    schema = tool_def.get("inputSchema", {})
+    props = schema.get("properties", {})
+    required = schema.get("required", [])
+    first_param = required[0] if required else (list(props.keys())[0] if props else None)
+    if not first_param:
+        raise ValueError(f"tool has no parameters, but args provided: {args_str!r}")
+
+    param_type = props.get(first_param, {}).get("type", "string")
+    if param_type == "integer" and args_str.isdigit():
+        value = int(args_str)
+    elif param_type == "number":
+        try:
+            value = float(args_str)
+        except ValueError:
+            value = args_str
+    else:
+        value = args_str
+
+    return {first_param: value}, f"→ {first_param}={args_str!r}"
 
 
 class MCPMixin:
@@ -106,21 +221,37 @@ class MCPMixin:
             }
 
     def _mcp_connect(self, name: str, cfg: dict, verbose: bool = False, cache_dir: Path = None):
-        """Connect to an MCP server and register its tools."""
-        command = cfg.get("command", "")
-        if not command:
-            return
+        """Connect to an MCP server and register its tools.
+
+        Chooses transport automatically:
+          - cfg has 'url'     → HTTPMCPClient (MCP Streamable HTTP)
+          - cfg has 'command' → MCPClient (stdio)
+        """
         if cache_dir is None:
             cache_dir = self._mcp_cache_dirs.get(name,
                 self.config.work_dir / ".emelya" / "mcp_cache")
         status_cb = (lambda msg: print(f"  MCP {name}: {msg}", flush=True)) if verbose else None
-        client = MCPClient(
-            name=name, command=command,
-            args=cfg.get("args", []),
-            env=cfg.get("env"),
-            work_dir=str(self.config.work_dir),
-        )
-        client.start(timeout=30, on_status=status_cb)
+
+        if cfg.get("url"):
+            # HTTP transport — no subprocess
+            client = HTTPMCPClient(
+                name=name,
+                url=cfg["url"],
+                headers=cfg.get("headers", {}),
+                timeout=cfg.get("timeout", 30),
+            )
+        elif cfg.get("command"):
+            client = MCPClient(
+                name=name,
+                command=cfg["command"],
+                args=cfg.get("args", []),
+                env=cfg.get("env"),
+                work_dir=str(self.config.work_dir),
+            )
+        else:
+            raise MCPError(f"Server '{name}' has neither 'url' nor 'command'")
+
+        client.start(timeout=cfg.get("timeout", 30), on_status=status_cb)
         self._mcp_clients[name] = client
 
         # Cache tools next to the server's config file
@@ -170,7 +301,7 @@ class MCPMixin:
         if not mcp_config and not self._mcp_clients:
             print(f"  {t('no_mcp')}")
             print(f"  {t('config')}: {config_path}")
-            print(f"  {t('add_hint')}: /mcp add <name> <command> [args...]")
+            print(f"  {t('add_hint')}: /mcp add <name> -- <command>")
             return
 
         # Show all configured servers (connected or cached)
@@ -180,8 +311,7 @@ class MCPMixin:
 
             if name in self._mcp_clients:
                 client = self._mcp_clients[name]
-                running = client._process and client._process.poll() is None
-                status = "connected" if running else "stopped"
+                status = "connected" if client.is_alive else "stopped"
                 info = client.server_info or {}
                 server_name = info.get("name", "")
                 extra = f" ({server_name})" if server_name else ""
@@ -196,53 +326,34 @@ class MCPMixin:
 
     def _mcp_add(self, arg: str):
         if not arg:
-            print("  Usage: /mcp add <name> <command> [args...]")
-            print("  Options: --env KEY=VALUE (can repeat)")
+            print("  Usage:")
+            print("    /mcp add <name> -- <command> [args...]   (stdio)")
+            print("    /mcp add <name> <url> [KEY=VALUE ...]    (HTTP)")
             print("  Examples:")
-            print("    /mcp add playwright npx -y @playwright/mcp@latest")
-            print("    /mcp add myserver python3 /path/to/server.py")
-            print("    /mcp add remote npx mcp-remote https://example.com/mcp --header Auth: token")
-            print("    /mcp add gemini node server.mjs --env GEMINI_API_KEY=xxx")
+            print("    /mcp add playwright -- npx -y @playwright/mcp@latest")
+            print("    /mcp add shopfans https://example.com/mcp X-Auth-Token=secret")
             return
 
-        # Parse with shell quoting support
         import shlex
         try:
-            raw_parts = shlex.split(arg)
+            parts = shlex.split(arg)
         except ValueError:
-            raw_parts = arg.split()
-        env = {}
-        filtered = []
-        i = 0
-        while i < len(raw_parts):
-            if raw_parts[i] == "--env" and i + 1 < len(raw_parts):
-                kv = raw_parts[i + 1]
-                if "=" in kv:
-                    k, v = kv.split("=", 1)
-                    env[k] = v
-                i += 2
-            else:
-                filtered.append(raw_parts[i])
-                i += 1
+            parts = arg.split()
 
-        if len(filtered) < 2:
-            print("  Error: need at least a name and command")
+        try:
+            name, entry = _parse_mcp_add_args(parts)
+        except ValueError as e:
+            print(f"  Error: {e}")
             return
-        name = filtered[0]
-        command = filtered[1]
-        args = filtered[2:] if len(filtered) > 2 else []
 
         # Save to config
         app_data_dir = self.config.work_dir / ".emelya"
         config_path = app_data_dir / "mcp.json"
-        config = load_mcp_config(config_path)
-        entry = {"command": command, "args": args}
-        if env:
-            entry["env"] = env
-        config[name] = entry
+        existing = load_mcp_config(config_path)
+        existing[name] = entry
         app_data_dir.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
-            json.dumps({"servers": config}, indent=2, ensure_ascii=False),
+            json.dumps({"servers": existing}, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
@@ -250,9 +361,7 @@ class MCPMixin:
         cache_dir = app_data_dir / "mcp_cache"
         status_cb = lambda msg: print(f"  [{name}] {msg}", flush=True)
         try:
-            client = MCPClient(name=name, command=command, args=args,
-                               env=env or None,
-                               work_dir=str(self.config.work_dir))
+            client = _make_mcp_client(name, entry, work_dir=str(self.config.work_dir))
             client.start(timeout=60, on_status=status_cb)
             self._mcp_clients[name] = client
 
@@ -265,7 +374,7 @@ class MCPMixin:
             print(f"  Added: {name} ({len(cached)} tools: {', '.join(tool_names)})")
         except MCPError as e:
             print(f"  Error: {e}")
-            print("  Saved to config. Fix the issue and try /mcp restart")
+            print("  Saved to config. Fix the issue and try /mcp refresh")
 
     def _mcp_remove(self, name: str):
         if not name:
@@ -392,7 +501,7 @@ class MCPMixin:
         tool_name = parts[1]
         args_str = parts[2].strip() if len(parts) > 2 else ""
 
-        # Find the tool first (needed for schema lookup)
+        # Find the tool (needed for schema lookup)
         category = f"mcp:{srv_name}"
         ext_tools = self.registry._extensions.get(category, {})
         if not ext_tools:
@@ -404,58 +513,25 @@ class MCPMixin:
             print(f"  Available: {available}")
             return
 
-        # Parse args
-        call_args = {}
-        if args_str:
-            if args_str.startswith("{"):
-                # JSON object
-                try:
-                    call_args = json.loads(args_str)
-                except json.JSONDecodeError as e:
-                    print(f"  Error: invalid JSON: {e}")
-                    return
-            else:
-                # Plain text → assign to first parameter from schema
-                defn = ext_tools[tool_name].get("definition", {}).get("function", {})
-                params = defn.get("parameters", {}).get("properties", {})
-                required = defn.get("parameters", {}).get("required", [])
-                # Pick the first required param, or the first param overall
-                first_param = required[0] if required else (list(params.keys())[0] if params else None)
-                if first_param:
-                    # Auto-convert numeric values
-                    param_type = params.get(first_param, {}).get("type", "string")
-                    if param_type == "integer" and args_str.isdigit():
-                        call_args = {first_param: int(args_str)}
-                    elif param_type == "number":
-                        try:
-                            call_args = {first_param: float(args_str)}
-                        except ValueError:
-                            call_args = {first_param: args_str}
-                    else:
-                        call_args = {first_param: args_str}
-                    print(f"  {C.muted}→ {first_param}={args_str!r}{C.reset}")
-                else:
-                    print(f"  Error: tool has no parameters, but args provided: {args_str}")
-                    return
+        # Parse args using schema from registry definition
+        defn = ext_tools[tool_name].get("definition", {}).get("function", {})
+        tool_def = {"inputSchema": defn.get("parameters", {})}
+        try:
+            call_args, hint = parse_mcp_call_args(args_str, tool_def)
+        except ValueError as e:
+            print(f"  Error: {e}")
+            return
+        if hint:
+            print(f"  {C.muted}{hint}{C.reset}")
 
         print(f"  Calling {srv_name}/{tool_name}...")
         try:
             result = ext_tools[tool_name]["execute"](call_args, self.tool_ctx)
             print()
-            print(self._format_mcp_result(result))
+            print(format_mcp_result(result))
         except Exception as e:
             print(f"  Error: {e}")
 
     @staticmethod
     def _format_mcp_result(result: str) -> str:
-        """Format MCP result for display. Pretty-print JSON if compact enough."""
-        try:
-            data = json.loads(result)
-        except (json.JSONDecodeError, ValueError):
-            return result
-
-        pretty = json.dumps(data, indent=2, ensure_ascii=False)
-        if pretty.count("\n") <= 100:
-            return pretty
-        # Too large — compact single-line
-        return json.dumps(data, ensure_ascii=False)
+        return format_mcp_result(result)

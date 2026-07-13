@@ -1022,25 +1022,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             ctx_info = f", ctx:{self.context.context_limit // 1000}K"
             print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {t('ready_model', model=self._model_display)}{C.muted}{ctx_info}{C.reset}")
         else:
-            # Translate known error messages
-            if info == "Server unavailable":
-                info = t("server_unavailable")
-            elif "Authentication failed" in info:
-                info = t("auth_failed")
-            print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {C.warning}{info}{C.reset}. {t('use_model_switch')}")
-
-        # Show MCP status collected during init
-        if self._mcp_startup_info:
-            for entry in self._mcp_startup_info:
-                name, n_tools = entry[0], entry[1]
-                is_cached = entry[2] if len(entry) > 2 else False
-                err = entry[3] if len(entry) > 3 else None
-                if err:
-                    print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} MCP {C.warning}{name}{C.reset} — {err}")
-                elif is_cached:
-                    print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} MCP {C.muted}{name}{C.reset} — {n_tools} tools ({t('cached')})")
-                else:
-                    print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} MCP {C.success}{name}{C.reset} — {n_tools} tools")
+            pass  # model unavailable — silently proceed, /model will show status
 
         print(f"\n{C.agent_prefix}{t('emelya')}:{C.reset} {t('greeting')}")
 
@@ -1082,8 +1064,12 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 continue
 
             # Handle /commands — anything starting with / is a command, never sent to model
+            if user_input.strip().lower() in ("exit", "quit", "выход", "пока", "учше", "йгше",
+                                              "/exit", "/quit"):
+                user_input = "/exit"
+
             if user_input.startswith("/"):
-                if user_input in ("/exit", "/quit"):
+                if user_input == "/exit":
                     print(f"\n{t('bye')}")
                     break
                 if not self._handle_command(user_input):

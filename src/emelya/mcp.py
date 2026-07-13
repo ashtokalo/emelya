@@ -1,14 +1,140 @@
-"""MCP client — Model Context Protocol over stdio transport."""
+"""MCP client — Model Context Protocol over stdio and HTTP transports."""
 
 import json
 import os
 import subprocess
 import threading
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 
 class MCPError(Exception):
     pass
+
+
+class HTTPMCPClient:
+    """JSON-RPC 2.0 client over HTTP for MCP Streamable HTTP servers.
+
+    Each method call is a separate POST to a single URL.
+    No process management, no session state — fully stateless.
+
+    Config format in mcp.json:
+        {
+          "url": "https://example.com/mcp",
+          "headers": {"X-Auth-Token": "..."},
+          "timeout": 30
+        }
+    """
+
+    def __init__(self, name: str, url: str, headers: dict = None, timeout: int = 30):
+        self.name = name
+        self.url = url
+        self._headers = headers or {}
+        self._timeout = timeout
+        self._id = 0
+        self._lock = threading.Lock()
+        self.server_info = {}
+        self.tools = []
+
+    def _next_id(self) -> int:
+        with self._lock:
+            self._id += 1
+            return self._id
+
+    def _post(self, method: str, params: dict) -> dict:
+        """Send a single JSON-RPC POST, return result dict."""
+        msg = {
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": method,
+            "params": params,
+        }
+        body = json.dumps(msg).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        headers.update(self._headers)
+        req = urllib.request.Request(self.url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body_text = ""
+            try:
+                body_text = e.read().decode("utf-8", errors="replace")[:200]
+            except Exception:
+                pass
+            raise MCPError(f"HTTP {e.code}: {body_text}")
+        except urllib.error.URLError as e:
+            raise MCPError(f"Connection error: {e.reason}")
+        except Exception as e:
+            raise MCPError(f"Request failed: {e}")
+
+        if "error" in data:
+            err = data["error"]
+            raise MCPError(f"MCP error ({err.get('code', '?')}): {err.get('message', 'unknown')}")
+        return data.get("result", {})
+
+    def start(self, timeout: int = 30, on_status=None):
+        """Initialize: call tools/list to populate self.tools."""
+        self._timeout = timeout
+
+        def status(msg):
+            if on_status:
+                on_status(msg)
+
+        status(f"Connecting to {self.url}...")
+        try:
+            result = self._post("initialize", {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "emelya", "version": "1.0"},
+            })
+            self.server_info = result.get("serverInfo", {})
+            server_name = self.server_info.get("name", "?")
+            status(f"Connected to {server_name}")
+        except MCPError:
+            # Server may not require initialize — proceed to tools/list anyway
+            status("Skipped initialize, fetching tools...")
+
+        status("Loading tools...")
+        result = self._post("tools/list", {})
+        self.tools = result.get("tools", [])
+        status(f"Ready ({len(self.tools)} tools)")
+
+    def stop(self):
+        """No-op — HTTP transport has no persistent connection."""
+        pass
+
+    @property
+    def is_alive(self) -> bool:
+        return True  # HTTP is always available
+
+    def call_tool(self, tool_name: str, arguments: dict) -> str:
+        """Call an MCP tool, return result as string."""
+        result = self._post("tools/call", {
+            "name": tool_name,
+            "arguments": arguments,
+        })
+        content = result.get("content", [])
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                elif item.get("type") == "image":
+                    parts.append(f"[image: {item.get('mimeType', 'unknown')}]")
+                else:
+                    parts.append(str(item))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts) if parts else "(empty result)"
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *args):
+        self.stop()
 
 
 class MCPClient:
