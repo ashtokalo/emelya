@@ -62,6 +62,7 @@ class MockREPL(ModelMixin, MCPMixin, CommandsMixin):
         self._manual_model = False
         self._mcp_clients = {}
         self._mcp_config = {}
+        self._custom_commands = {}
         self.active_model = "local"
         self.llm = MagicMock()
         self._use_compact_tools = False
@@ -275,6 +276,69 @@ class TestMCPCommand(unittest.TestCase):
 
         result = MCPMixin._format_mcp_result("plain text")
         self.assertEqual(result, "plain text")
+
+
+class TestCustomCommands(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.commands_dir = self.tmpdir / ".emelya" / "commands"
+        self.commands_dir.mkdir(parents=True)
+        self.repl = MockREPL(self.tmpdir)
+
+    def tearDown(self):
+        self.repl.cleanup()
+
+    def test_scan_empty_dir(self):
+        cmds = self.repl._scan_custom_commands()
+        self.assertEqual(cmds, {})
+
+    def test_scan_finds_md_file(self):
+        (self.commands_dir / "deploy.md").write_text("# Deploy\nRun deployment steps.")
+        cmds = self.repl._scan_custom_commands()
+        self.assertIn("/deploy", cmds)
+        self.assertEqual(cmds["/deploy"]["desc"], "Deploy")
+
+    def test_scan_frontmatter_description(self):
+        (self.commands_dir / "report.md").write_text(
+            "---\ndescription: Weekly report\n---\nGenerate a weekly report."
+        )
+        cmds = self.repl._scan_custom_commands()
+        self.assertIn("/report", cmds)
+        self.assertEqual(cmds["/report"]["desc"], "Weekly report")
+
+    def test_handle_custom_command_dispatches(self):
+        (self.commands_dir / "greet.md").write_text("Say hello.")
+        self.repl._custom_commands = self.repl._scan_custom_commands()
+        calls = []
+        self.repl._agent_loop = lambda msg: calls.append(msg)
+        handled = self.repl._handle_command("/greet")
+        self.assertTrue(handled)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Say hello.", calls[0])
+
+    def test_handle_custom_command_passes_args(self):
+        (self.commands_dir / "deploy.md").write_text("Deploy to {args}.")
+        self.repl._custom_commands = self.repl._scan_custom_commands()
+        calls = []
+        self.repl._agent_loop = lambda msg: calls.append(msg)
+        self.repl._handle_command("/deploy staging")
+        self.assertIn("Deploy to staging.", calls[0])
+
+    def test_list_commands_empty(self):
+        with patch("builtins.print") as mock_print:
+            self.repl._cmd_list_commands()
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("No custom commands", printed)
+
+    def test_list_commands_shows_entries(self):
+        (self.commands_dir / "deploy.md").write_text("# Deploy\nDeploy steps.")
+        self.repl._custom_commands = self.repl._scan_custom_commands()
+        with patch("builtins.print") as mock_print:
+            self.repl._cmd_list_commands()
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("/deploy", printed)
+        self.assertIn("Deploy", printed)
 
 
 if __name__ == "__main__":

@@ -246,9 +246,10 @@ def path_completer(work_dir, query):
 class LineEditor:
     """Interactive line editor. Buffer is list[str] (single chars + markers)."""
 
-    def __init__(self, work_dir=None):
+    def __init__(self, work_dir=None, extra_commands=None):
         self.work_dir = work_dir or os.getcwd()
         self._prev_wrap_lines = 0
+        self._extra_commands = list(extra_commands) if extra_commands else []
 
     def read(self, prompt="You: ", history=None):
         """Read a line. Returns str on Enter, None on Ctrl+C/Escape."""
@@ -511,15 +512,15 @@ class LineEditor:
         "/help", "/clear", "/compact", "/undo", "/drop",
         "/rename", "/resume", "/branch", "/export",
         "/model", "/skill", "/agent",
-        "/tools", "/mcp",
+        "/tools", "/mcp", "/commands",
         "/stats", "/context", "/history", "/exit",
     ]
 
-    @staticmethod
-    def _complete_command_name(prefix: str) -> list:
+    def _complete_command_name(self, prefix: str) -> list:
         """Complete /command name from prefix (without the /)."""
         prefix_lower = prefix.lower()
-        return [c for c in LineEditor._ALL_COMMANDS if c[1:].startswith(prefix_lower)]
+        all_cmds = self._ALL_COMMANDS + self._extra_commands
+        return [c for c in all_cmds if c[1:].startswith(prefix_lower)]
 
     # Commands that support Tab completion for their first argument
     _COMPLETABLE_CMDS = {

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-06-22
+
+### Added
+- **Custom commands** — create `.md` files in `.emelya/commands/` to define new `/command` shortcuts. Each file becomes a `/filename` command that runs its content as a prompt. Use `{args}` placeholder to pass arguments. Supports YAML frontmatter `description:` or first heading as description.
+- **`/commands`** — lists all available custom commands with descriptions. Tab completion works for custom command names.
+- **Memory** — add `.md` files to `.emelya/memory/`. The directory is scanned automatically; the first `#` heading of each file becomes its description in the index injected into the system prompt. Files are loaded on demand via the `read` tool.
+- **`.emelya` scaffolding** — on first run in a new directory, creates the full `.emelya/` structure: `commands/`, `memory/MEMORY.md`, `mcp.json` (empty server list), `models.json` (routing with all operations pointing to `local`).
+
 ## [0.5.0] - 2026-06-18
 
 ### Added

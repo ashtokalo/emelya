@@ -107,33 +107,43 @@ class TestCommandCompletion(unittest.TestCase):
 
 class TestCommandNameCompletion(unittest.TestCase):
 
+    def setUp(self):
+        self.editor = LineEditor()
+
     def test_full_prefix(self):
-        items = LineEditor._complete_command_name("help")
+        items = self.editor._complete_command_name("help")
         self.assertEqual(items, ["/help"])
 
     def test_partial_prefix(self):
-        items = LineEditor._complete_command_name("re")
+        items = self.editor._complete_command_name("re")
         self.assertIn("/rename", items)
         self.assertIn("/resume", items)
         self.assertNotIn("/clear", items)
 
     def test_empty_prefix(self):
-        items = LineEditor._complete_command_name("")
+        items = self.editor._complete_command_name("")
         self.assertEqual(len(items), len(LineEditor._ALL_COMMANDS))
 
     def test_no_match(self):
-        items = LineEditor._complete_command_name("zzz")
+        items = self.editor._complete_command_name("zzz")
         self.assertEqual(items, [])
 
     def test_single_char(self):
-        items = LineEditor._complete_command_name("c")
+        items = self.editor._complete_command_name("c")
         self.assertIn("/clear", items)
         self.assertIn("/compact", items)
         self.assertIn("/context", items)
 
     def test_branch(self):
-        items = LineEditor._complete_command_name("br")
+        items = self.editor._complete_command_name("br")
         self.assertEqual(items, ["/branch"])
+
+    def test_extra_commands(self):
+        editor = LineEditor(extra_commands=["/deploy", "/weekly-report"])
+        items = editor._complete_command_name("dep")
+        self.assertEqual(items, ["/deploy"])
+        items = editor._complete_command_name("w")
+        self.assertIn("/weekly-report", items)
 
 
 class TestAtQuery(unittest.TestCase):

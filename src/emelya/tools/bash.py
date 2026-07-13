@@ -103,6 +103,17 @@ READONLY_COMMANDS = {
     "make --version", "cmake --version", "npm --version",
     # project tools (read-only)
     "op list", "op inspect", "op search",
+    # GitHub CLI read-only
+    "gh pr view", "gh pr diff", "gh pr list", "gh pr status", "gh pr checks",
+    "gh pr review --list",
+    "gh issue view", "gh issue list",
+    "gh repo view", "gh repo list",
+    "gh release view", "gh release list",
+    "gh run view", "gh run list",
+    "gh workflow view", "gh workflow list",
+    "gh gist view", "gh gist list",
+    "gh label list",
+    "gh auth status",
 }
 
 DEFAULT_MAX_OUTPUT = 8192

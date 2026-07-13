@@ -26,6 +26,15 @@ from emelya.mcp_manager import MCPMixin
 from emelya.commands import CommandsMixin
 
 
+def _first_heading(text: str) -> str:
+    """Return text of first # heading in a markdown file, or empty string."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#"):
+            return line.lstrip("#").strip()
+    return ""
+
+
 class _WaitSpinner:
     """Animated spinner with timer, shown while waiting for LLM response."""
 
@@ -129,6 +138,9 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         self._mcp_startup_info = []  # collected during init, printed after banner
         self._init_mcp()
 
+        # Scan custom commands from .emelya/commands/
+        self._custom_commands = self._scan_custom_commands()
+
         # Update skill/agent tool descriptions with available items
         self._update_dynamic_descriptions()
 
@@ -215,6 +227,21 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                     prompt += f"\n\nLocal instructions ({local_config.name}):\n{local}"
             except Exception:
                 pass
+
+        # Build memory index from .emelya/memory/*.md
+        memory_dir = self.config.work_dir / ".emelya" / "memory"
+        if memory_dir.is_dir():
+            index_lines = []
+            for f in sorted(memory_dir.glob("*.md")):
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    desc = _first_heading(content) or f.stem
+                    index_lines.append(f"- [{desc}](.emelya/memory/{f.name})")
+                except Exception:
+                    pass
+            if index_lines:
+                index = "\n".join(index_lines)
+                prompt += f"\n\nMemory (.emelya/memory/):\n{index}\n\nUse read tool to load specific memory files when relevant to the task."
 
         self.context.set_system(prompt)
 
@@ -959,7 +986,8 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
 
         # Interactive line editor with per-session history
         self.input_history = InputHistory(str(self._session_dir() / "history"))
-        editor = LineEditor(work_dir=self.config.work_dir)
+        extra_cmds = list(self._custom_commands.keys())
+        editor = LineEditor(work_dir=self.config.work_dir, extra_commands=extra_cmds)
 
         while True:
             try:
@@ -983,7 +1011,8 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 if not self._handle_command(user_input):
                     cmd = user_input.split()[0]
                     print(f"  {t('unknown_cmd')}: {cmd}")
-                    print("  Available: /help /clear /compact /undo /drop /rename /resume /branch /export /model /skill /agent /tools /mcp /stats /context /history /exit")
+                    custom = (" " + " ".join(self._custom_commands)) if self._custom_commands else ""
+                    print(f"  Available: /help /clear /compact /undo /drop /rename /resume /branch /export /model /skill /agent /tools /mcp /stats /context /history /commands /exit{custom}")
                 continue
 
             # Check context budget before sending to model

@@ -16,3 +16,4 @@ Rules:
 13. For complex multi-step tasks (analysis, refactoring, writing reports), use plan_mode or agent planner.
 14. For multi-step work, use task(action="create") to track progress — user sees [1/N] status.
 15. To search the internet, use web_search first, then web_fetch for specific URLs.
+16. If memory files are listed above, check the index before starting new tasks. Load individual files with read when the topic matches.

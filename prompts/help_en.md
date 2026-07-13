@@ -32,6 +32,9 @@
   /mcp                   — MCP server status
   /mcp add name command  — connect MCP server
 
+  /commands              — list custom commands
+  /mycmd [args]          — run a custom command (from .emelya/commands/mycmd.md)
+
   /stats                 — token stats (session + project)
   /context               — current context size
   /history               — full context dump
@@ -44,3 +47,5 @@
   - Project config: emelya.md (repo) and .emelya/config.md (personal)
   - MCP servers connect lazily — on first tool call
   - /compact helps when context grows and model slows down
+  - Custom commands: add .md files to .emelya/commands/ (use {args} as placeholder)
+  - Memory: add .md files to .emelya/memory/ — indexed automatically by their first heading
