@@ -9,8 +9,12 @@ class Sandbox:
 
     ALLOWED_PREFIXES = ["/tmp"]
 
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, extra_allowed: list = None):
         self.work_dir = work_dir.resolve()
+        self._allowed = list(self.ALLOWED_PREFIXES)
+        if extra_allowed:
+            for p in extra_allowed:
+                self._allowed.append(str(Path(p).resolve()))
 
     def validate(self, path: str) -> Path:
         """Resolve path relative to work_dir and verify it's within sandbox.
@@ -33,7 +37,7 @@ class Sandbox:
 
         # Check allowed prefixes
         resolved_str = str(resolved)
-        for prefix in self.ALLOWED_PREFIXES:
+        for prefix in self._allowed:
             if resolved_str == prefix or resolved_str.startswith(prefix + os.sep):
                 return resolved
 

@@ -65,5 +65,34 @@ class TestSandbox(unittest.TestCase):
         self.assertIn("src/tools/read.py", hint)
 
 
+class TestSandboxExtraAllowed(unittest.TestCase):
+
+    def setUp(self):
+        self.workdir = Path(tempfile.mkdtemp())
+        # Use a non-/tmp path so extra_allowed is the only reason it'd be accessible.
+        # We point to an existing directory that is not under /tmp: /var/cache or similar.
+        # For portability, we just test _allowed contents and /etc rejection.
+        self.extra_path = Path("/var/cache")  # exists on Linux, outside /tmp and workdir
+        self.sandbox = Sandbox(self.workdir, extra_allowed=[self.extra_path])
+
+    def test_extra_allowed_added_to_internal_list(self):
+        self.assertIn(str(self.extra_path.resolve()), self.sandbox._allowed)
+
+    def test_extra_allowed_permits_file_inside(self):
+        # /var/cache itself resolves as an allowed prefix
+        resolved = self.sandbox.validate(str(self.extra_path))
+        self.assertEqual(resolved, self.extra_path.resolve())
+
+    def test_extra_allowed_does_not_open_unrelated(self):
+        # /etc is not in extra_allowed, must still be rejected
+        with self.assertRaises(PermissionError):
+            self.sandbox.validate("/etc/passwd")
+
+    def test_no_extra_allowed_rejects_outside_workdir(self):
+        sandbox = Sandbox(self.workdir)
+        with self.assertRaises(PermissionError):
+            sandbox.validate("/etc/passwd")
+
+
 if __name__ == "__main__":
     unittest.main()

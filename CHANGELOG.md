@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-07-13
+
+### Added
+- **Global `~/.emelya/` support** — commands, memory, models, routing, and MCP servers can now be defined globally in `~/.emelya/` and are shared across all projects.
+  - **Commands** — `~/.emelya/commands/*.md` are loaded as global custom commands; local `.emelya/commands/` overrides same-named commands.
+  - **Memory** — `~/.emelya/memory/*.md` is indexed first (global), followed by `.emelya/memory/*.md` (local); all files are injected into the system prompt index.
+  - **Models & routing** — `~/.emelya/models.json` is loaded before `.emelya/models.json`; local entries override global for the same model name or routing operation.
+  - **MCP servers** — `~/.emelya/mcp.json` is loaded before `.emelya/mcp.json`; local servers override global servers with the same name. Each server's tool cache lives next to its config file (`~/.emelya/mcp_cache/` for global, `.emelya/mcp_cache/` for local).
+- **Sandbox: `extra_allowed` paths** — `Sandbox` now accepts an `extra_allowed` list so global memory files (`~/.emelya/memory/`) can be read by the model without access-control errors.
+
 ## [0.5.1] - 2026-06-22
 
 ### Added

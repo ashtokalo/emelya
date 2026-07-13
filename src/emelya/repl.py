@@ -90,7 +90,9 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
     def __init__(self, config: Config):
         self.config = config
         self.context = Context(context_limit=config.context_limit)
-        self.sandbox = Sandbox(config.work_dir)
+        global_memory = Path.home() / ".emelya" / "memory"
+        extra_allowed = [global_memory] if global_memory.is_dir() else []
+        self.sandbox = Sandbox(config.work_dir, extra_allowed=extra_allowed)
         self.registry = ToolRegistry()
 
         src_dir = Path(__file__).parent          # src/emelya/
@@ -228,20 +230,29 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             except Exception:
                 pass
 
-        # Build memory index from .emelya/memory/*.md
-        memory_dir = self.config.work_dir / ".emelya" / "memory"
-        if memory_dir.is_dir():
-            index_lines = []
-            for f in sorted(memory_dir.glob("*.md")):
+        # Build memory index: global ~/.emelya/memory/ first, then local .emelya/memory/
+        index_lines = []
+        global_memory_dir = Path.home() / ".emelya" / "memory"
+        if global_memory_dir.is_dir():
+            for f in sorted(global_memory_dir.glob("*.md")):
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    desc = _first_heading(content) or f.stem
+                    index_lines.append(f"- [{desc}]({f})")
+                except Exception:
+                    pass
+        local_memory_dir = self.config.work_dir / ".emelya" / "memory"
+        if local_memory_dir.is_dir():
+            for f in sorted(local_memory_dir.glob("*.md")):
                 try:
                     content = f.read_text(encoding="utf-8")
                     desc = _first_heading(content) or f.stem
                     index_lines.append(f"- [{desc}](.emelya/memory/{f.name})")
                 except Exception:
                     pass
-            if index_lines:
-                index = "\n".join(index_lines)
-                prompt += f"\n\nMemory (.emelya/memory/):\n{index}\n\nUse read tool to load specific memory files when relevant to the task."
+        if index_lines:
+            index = "\n".join(index_lines)
+            prompt += f"\n\nMemory:\n{index}\n\nUse read tool to load specific memory files when relevant to the task."
 
         self.context.set_system(prompt)
 

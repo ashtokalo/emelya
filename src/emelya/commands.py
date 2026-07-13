@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 from emelya import __version__
 from emelya.i18n import t
@@ -153,18 +154,26 @@ class CommandsMixin:
         return False
 
     def _scan_custom_commands(self) -> dict:
-        """Scan .emelya/commands/ for user-defined .md commands."""
-        commands_dir = self.config.work_dir / ".emelya" / "commands"
+        """Scan .emelya/commands/ for user-defined .md commands.
+
+        Global commands from ~/.emelya/commands/ are loaded first.
+        Local commands from {work_dir}/.emelya/commands/ override them.
+        """
         result = {}
-        if not commands_dir.is_dir():
-            return result
-        for f in sorted(commands_dir.glob("*.md")):
-            try:
-                content = f.read_text(encoding="utf-8").strip()
-                desc = _extract_cmd_desc(content) or f.stem
-                result[f"/{f.stem}"] = {"path": f, "desc": desc}
-            except Exception:
-                result[f"/{f.stem}"] = {"path": f, "desc": f.stem}
+        dirs = [
+            Path.home() / ".emelya" / "commands",
+            self.config.work_dir / ".emelya" / "commands",
+        ]
+        for commands_dir in dirs:
+            if not commands_dir.is_dir():
+                continue
+            for f in sorted(commands_dir.glob("*.md")):
+                try:
+                    content = f.read_text(encoding="utf-8").strip()
+                    desc = _extract_cmd_desc(content) or f.stem
+                    result[f"/{f.stem}"] = {"path": f, "desc": desc}
+                except Exception:
+                    result[f"/{f.stem}"] = {"path": f, "desc": f.stem}
         return result
 
     def _run_custom_command(self, name: str, args: str = ""):

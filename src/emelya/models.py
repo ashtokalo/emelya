@@ -1,6 +1,7 @@
 """Model management mixin — multi-model support, routing, failover chains."""
 
 import json
+from pathlib import Path
 
 from emelya.i18n import t
 from emelya.theme import C
@@ -31,7 +32,8 @@ class ModelMixin:
     }
 
     def _load_models(self) -> dict:
-        """Load models and routing from .emelya/models.json."""
+        """Load models and routing. Global ~/.emelya/models.json first,
+        then local .emelya/models.json — local values override global."""
         models = {
             "local": {
                 "base_url": self.config.base_url,
@@ -39,13 +41,18 @@ class ModelMixin:
             }
         }
         self._routing = {}  # operation → [model_name, ...]
-        if self._models_path.exists():
-            try:
-                data = json.loads(self._models_path.read_text(encoding="utf-8"))
-                models.update(data.get("models", {}))
-                self._routing = data.get("routing", {})
-            except (json.JSONDecodeError, OSError):
-                pass
+        config_paths = [
+            Path.home() / ".emelya" / "models.json",
+            self._models_path,
+        ]
+        for path in config_paths:
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    models.update(data.get("models", {}))
+                    self._routing.update(data.get("routing", {}))
+                except (json.JSONDecodeError, OSError):
+                    pass
         return models
 
     def _save_models(self):

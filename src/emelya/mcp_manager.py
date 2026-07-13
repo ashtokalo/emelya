@@ -1,6 +1,7 @@
 """MCP management mixin — server lifecycle, lazy loading, commands."""
 
 import json
+from pathlib import Path
 
 from emelya.i18n import t
 from emelya.theme import C
@@ -17,17 +18,31 @@ class MCPMixin:
     def _init_mcp(self):
         """Register MCP servers from cache. No connections at startup.
 
+        Loads global ~/.emelya/mcp.json first, then local .emelya/mcp.json.
+        Local servers override global servers with the same name.
+        Each server's cache lives next to its config file.
         Servers connect lazily when load_tools("mcp:name") is called.
         """
-        app_data_dir = self.config.work_dir / ".emelya"
-        config_path = app_data_dir / "mcp.json"
-        cache_dir = app_data_dir / "mcp_cache"
+        global_data_dir = Path.home() / ".emelya"
+        local_data_dir = self.config.work_dir / ".emelya"
 
-        self._mcp_config = load_mcp_config(config_path)
+        # Merge: global first, local overrides
+        merged_config = {}
+        cache_dirs: dict[str, Path] = {}
+        for data_dir in (global_data_dir, local_data_dir):
+            cfg = load_mcp_config(data_dir / "mcp.json")
+            for name, server_cfg in cfg.items():
+                merged_config[name] = server_cfg
+                cache_dirs[name] = data_dir / "mcp_cache"
+
+        self._mcp_config = merged_config
+        self._mcp_cache_dirs = cache_dirs
+
         if not self._mcp_config:
             return
 
         for name, cfg in self._mcp_config.items():
+            cache_dir = cache_dirs[name]
             cached = load_cache(cache_dir, name)
             if cached:
                 # Register from cache with a lazy executor
@@ -35,7 +50,7 @@ class MCPMixin:
                 self._mcp_startup_info.append((name, len(cached), True))
             else:
                 try:
-                    self._mcp_connect(name, cfg)
+                    self._mcp_connect(name, cfg, cache_dir=cache_dir)
                     n = len(self._mcp_clients[name].tools)
                     self._mcp_startup_info.append((name, n, False))
                 except MCPError as e:
@@ -69,9 +84,10 @@ class MCPMixin:
                         cfg = self._mcp_config.get(srv_name)
                         if not cfg:
                             return f"Error: MCP server '{srv_name}' not configured"
+                        cache_dir = self._mcp_cache_dirs.get(srv_name)
                         print(f"\n  Connecting to MCP {srv_name}...", flush=True)
                         try:
-                            self._mcp_connect(srv_name, cfg, verbose=True)
+                            self._mcp_connect(srv_name, cfg, verbose=True, cache_dir=cache_dir)
                         except MCPError as e:
                             return f"Error connecting to {srv_name}: {e}"
                     client = self._mcp_clients.get(srv_name)
@@ -89,11 +105,14 @@ class MCPMixin:
                 "description": tool.get("description", tool_name),
             }
 
-    def _mcp_connect(self, name: str, cfg: dict, verbose: bool = False):
+    def _mcp_connect(self, name: str, cfg: dict, verbose: bool = False, cache_dir: Path = None):
         """Connect to an MCP server and register its tools."""
         command = cfg.get("command", "")
         if not command:
             return
+        if cache_dir is None:
+            cache_dir = self._mcp_cache_dirs.get(name,
+                self.config.work_dir / ".emelya" / "mcp_cache")
         status_cb = (lambda msg: print(f"  MCP {name}: {msg}", flush=True)) if verbose else None
         client = MCPClient(
             name=name, command=command,
@@ -104,8 +123,7 @@ class MCPMixin:
         client.start(timeout=30, on_status=status_cb)
         self._mcp_clients[name] = client
 
-        # Cache tools
-        cache_dir = self.config.work_dir / ".emelya" / "mcp_cache"
+        # Cache tools next to the server's config file
         cached = [compact_tool_description(t) for t in client.tools]
         save_cache(cache_dir, name, cached)
 
@@ -278,7 +296,7 @@ class MCPMixin:
 
     def _mcp_restart(self, name: str = ""):
         """Refresh MCP server(s): reconnect and update cache."""
-        config = load_mcp_config(self.config.work_dir / ".emelya" / "mcp.json")
+        config = self._mcp_config  # already merged global + local
         names = [name] if name else list(config.keys())
         if not names:
             print(f"  {t('no_mcp')}")
