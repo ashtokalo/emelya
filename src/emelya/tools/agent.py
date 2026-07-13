@@ -27,19 +27,27 @@ DEFINITION = {
 }
 
 
-def scan_agents(agents_dir: Path) -> dict:
-    """Scan agents directory, return {name: description}."""
-    agents = {}
-    if not agents_dir.is_dir():
-        return agents
+def scan_agents(dirs) -> dict:
+    """Scan one or more agents directories, return {name: description}.
 
-    for f in sorted(agents_dir.glob("*.md")):
-        try:
-            content = f.read_text(encoding="utf-8")
-            meta, _ = _parse_agent(content)
-            agents[f.stem] = meta.get("description", f.stem)
-        except Exception:
-            agents[f.stem] = f.stem
+    Accepts a single Path or a list of Paths. When multiple directories are
+    given, later entries override earlier ones for the same agent name
+    (builtin → global → local priority).
+    """
+    if isinstance(dirs, Path):
+        dirs = [dirs]
+    agents = {}
+    for d in dirs:
+        d = Path(d)
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.md")):
+            try:
+                content = f.read_text(encoding="utf-8")
+                meta, _ = _parse_agent(content)
+                agents[f.stem] = meta.get("description", f.stem)
+            except Exception:
+                agents[f.stem] = f.stem
     return agents
 
 
@@ -75,7 +83,8 @@ def execute(args: dict, ctx) -> str:
         except (json.JSONDecodeError, ValueError):
             agent_args = {}
 
-    if not ctx.agents_dir:
+    dirs = ctx.agents_dirs or []
+    if not dirs:
         return "Error: agents directory not configured"
     if not ctx.llm_client:
         return "Error: LLM client not available"
@@ -88,9 +97,16 @@ def execute(args: dict, ctx) -> str:
     if name.endswith(".md"):
         name = name[:-3]
 
-    path = ctx.agents_dir / f"{name}.md"
-    if not path.exists():
-        available = scan_agents(ctx.agents_dir)
+    # Search dirs in reverse order so local overrides builtin
+    path = None
+    for d in reversed(dirs):
+        candidate = Path(d) / f"{name}.md"
+        if candidate.exists():
+            path = candidate
+            break
+
+    if path is None:
+        available = scan_agents(dirs)
         avail_list = ", ".join(available.keys()) if available else "none"
         return f"Unknown agent '{name}'. Available: {avail_list}"
 
@@ -195,7 +211,7 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         config=ctx.config,
         agent_depth=depth,
         max_agent_depth=ctx.max_agent_depth,
-        agents_dir=ctx.agents_dir,
+        agents_dirs=ctx.agents_dirs,
         llm_client=llm_client,
         tool_registry=ctx.tool_registry,
         session_log=ctx.session_log,

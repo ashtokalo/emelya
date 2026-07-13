@@ -178,6 +178,15 @@ def execute(args: dict, ctx) -> str:
         cached_output, cached_rc = _output_cache[command]
         return _format_output(cached_output, cached_rc, max_output)
 
+    # PreBash hook — may block or substitute the command
+    hook_runner = getattr(ctx, "hook_runner", None)
+    if hook_runner:
+        hr = hook_runner.run("PreBash", {"command": command, "tool": "bash"})
+        if hr.block:
+            return f"Blocked by hook: {hr.reason or hr.message or 'hook'}"
+        if hr.command is not None:
+            command = hr.command
+
     confirm_mode = getattr(ctx.config, "confirm_mode", "confirm_all") if ctx.config else "confirm_all"
 
     if _needs_confirm(command, confirm_mode) and ctx.confirm:
@@ -198,6 +207,17 @@ def execute(args: dict, ctx) -> str:
             output += ("\n" if output else "") + result.stderr
 
         output = output.strip()
+
+        # PostBash hook — may substitute the output
+        if hook_runner:
+            hr = hook_runner.run("PostBash", {
+                "command": command,
+                "stdout": output,
+                "returncode": result.returncode,
+                "tool": "bash",
+            })
+            if hr.result is not None:
+                return hr.result
 
         # Cache if output exceeds requested limit (may be re-requested with larger limit)
         if len(output) > max_output:

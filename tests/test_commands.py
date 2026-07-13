@@ -42,8 +42,8 @@ class MockREPL(ModelMixin, MCPMixin, CommandsMixin):
         self.session_name = "test_session"
         self.sessions_dir = tmpdir / ".emelya" / "sessions"
         self.app_dir = tmpdir
-        self.skills_dir = tmpdir / "skills"
-        self.agents_dir = tmpdir / "agents"
+        self.skills_dirs = [tmpdir / "skills"]
+        self.agents_dirs = [tmpdir / "agents"]
 
         self.log = SessionLog(self.sessions_dir / self.session_name / "log.txt")
         self.usage_tracker = UsageTracker(tmpdir / ".emelya" / "usage.jsonl")
@@ -510,6 +510,78 @@ class TestCustomCommands(unittest.TestCase):
         printed = " ".join(str(c) for c in mock_print.call_args_list)
         self.assertIn("/deploy", printed)
         self.assertIn("Deploy", printed)
+
+
+class TestScanSkillsMultiDir(unittest.TestCase):
+    """Test scan_skills with a list of directories."""
+
+    def setUp(self):
+        from emelya.tools.skill import scan_skills
+        self.scan_skills = scan_skills
+        self.builtin = Path(tempfile.mkdtemp())
+        self.global_dir = Path(tempfile.mkdtemp())
+        self.local_dir = Path(tempfile.mkdtemp())
+
+    def test_single_dir_still_works(self):
+        (self.builtin / "git.md").write_text("# Git\nGit skill.")
+        skills = self.scan_skills(self.builtin)
+        self.assertIn("git", skills)
+
+    def test_all_dirs_merged(self):
+        (self.builtin / "git.md").write_text("# Git\nBuiltin git.")
+        (self.global_dir / "docker.md").write_text("# Docker\nGlobal docker.")
+        (self.local_dir / "myskill.md").write_text("# My Skill\nLocal skill.")
+        skills = self.scan_skills([self.builtin, self.global_dir, self.local_dir])
+        self.assertIn("git", skills)
+        self.assertIn("docker", skills)
+        self.assertIn("myskill", skills)
+
+    def test_local_overrides_builtin(self):
+        (self.builtin / "git.md").write_text("# Git Builtin\nBuiltin.")
+        (self.local_dir / "git.md").write_text("# Git Local\nLocal.")
+        skills = self.scan_skills([self.builtin, self.local_dir])
+        self.assertEqual(skills["git"], "Git Local")
+
+    def test_nonexistent_dir_skipped(self):
+        (self.builtin / "git.md").write_text("# Git\nBuiltin.")
+        skills = self.scan_skills([self.builtin, Path("/nonexistent/path")])
+        self.assertIn("git", skills)
+
+
+class TestScanAgentsMultiDir(unittest.TestCase):
+    """Test scan_agents with a list of directories."""
+
+    def setUp(self):
+        from emelya.tools.agent import scan_agents
+        self.scan_agents = scan_agents
+        self.builtin = Path(tempfile.mkdtemp())
+        self.global_dir = Path(tempfile.mkdtemp())
+        self.local_dir = Path(tempfile.mkdtemp())
+
+    def _write_agent(self, d, name, desc):
+        (d / f"{name}.md").write_text(
+            f"---\ndescription: {desc}\n---\nDo the task."
+        )
+
+    def test_all_dirs_merged(self):
+        self._write_agent(self.builtin, "explore_code", "Explore codebase")
+        self._write_agent(self.global_dir, "weekly_review", "Weekly code review")
+        self._write_agent(self.local_dir, "deploy_check", "Deployment checks")
+        agents = self.scan_agents([self.builtin, self.global_dir, self.local_dir])
+        self.assertIn("explore_code", agents)
+        self.assertIn("weekly_review", agents)
+        self.assertIn("deploy_check", agents)
+
+    def test_local_overrides_builtin(self):
+        self._write_agent(self.builtin, "review_file", "Builtin review")
+        self._write_agent(self.local_dir, "review_file", "Custom review")
+        agents = self.scan_agents([self.builtin, self.local_dir])
+        self.assertEqual(agents["review_file"], "Custom review")
+
+    def test_nonexistent_dir_skipped(self):
+        self._write_agent(self.builtin, "explore_code", "Explore")
+        agents = self.scan_agents([self.builtin, Path("/nonexistent")])
+        self.assertIn("explore_code", agents)
 
 
 class TestCustomCommandsGlobal(unittest.TestCase):

@@ -11,6 +11,16 @@ All notable changes to this project will be documented in this file.
   - **Models & routing** — `~/.emelya/models.json` is loaded before `.emelya/models.json`; local entries override global for the same model name or routing operation.
   - **MCP servers** — `~/.emelya/mcp.json` is loaded before `.emelya/mcp.json`; local servers override global servers with the same name. Each server's tool cache lives next to its config file (`~/.emelya/mcp_cache/` for global, `.emelya/mcp_cache/` for local).
 - **Sandbox: `extra_allowed` paths** — `Sandbox` now accepts an `extra_allowed` list so global memory files (`~/.emelya/memory/`) can be read by the model without access-control errors.
+  - **Skills** — `~/.emelya/skills/*.md` and `.emelya/skills/*.md` are merged with built-in skills; local overrides global overrides built-in for the same name.
+  - **Agents** — `~/.emelya/agents/*.md` and `.emelya/agents/*.md` are merged with built-in agents; same priority order. Tab completion for `/agent` and `/skill` covers all sources.
+- **Hooks system** — event-driven hooks for fine-grained control over tool execution. Configured in `~/.emelya/hooks.json` (global) and `.emelya/hooks.json` (local); lists are concatenated per event, global hooks run first. See `docs/hooks.md` for full reference.
+  - **Three hook types**: `command` (subprocess, stdin=JSON, exit 2=block), `http` (POST request, `allowedEnvVars` for secure header interpolation), `prompt` (isolated LLM call, selectable model, `{event}`/`{field}` placeholders).
+  - **Seven events**: `PreToolUse`, `PostToolUse`, `PreBash`, `PostBash`, `PreWrite`, `SessionStart`, `SessionEnd`.
+  - **Result substitution** — hooks can return `"result"` to replace a tool's output (e.g. PostBash filter to strip verbose output and reduce token usage).
+  - **Command substitution** — `PreBash` hooks can return `"command"` to replace the shell command before execution (e.g. wrap `git diff` with `rtk git diff`).
+  - **Chain behaviour** — when multiple hooks are registered for an event, each hook receives the state already modified by previous hooks: `command` and `result` substitutions propagate through the chain. A `block=true` from any hook stops the chain immediately.
+  - **Tools filter** — each hook entry accepts an optional `"tools": [...]` list to run only for specific tool names.
+- **38 new tests** — full coverage of `HookResult`, `HookRunner` (load/merge, all three hook types), chain behaviour, and bash/write/edit tool integrations.
 
 ## [0.5.1] - 2026-06-22
 

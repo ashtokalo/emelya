@@ -43,6 +43,13 @@ def execute(args: dict, ctx) -> str:
         ):
             return "Cancelled by user"
 
+    # PreWrite hook — may block the write
+    hook_runner = getattr(ctx, "hook_runner", None)
+    if hook_runner:
+        hr = hook_runner.run("PreWrite", {"path": str(path), "content": content, "tool": "write"})
+        if hr.block:
+            return f"Blocked by hook: {hr.reason or hr.message or 'hook'}"
+
     # Create parent directories
     path.parent.mkdir(parents=True, exist_ok=True)
 

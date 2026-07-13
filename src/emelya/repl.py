@@ -24,6 +24,7 @@ from emelya.tools.agent import scan_agents
 from emelya.models import ModelMixin
 from emelya.mcp_manager import MCPMixin
 from emelya.commands import CommandsMixin
+from emelya.hooks import HookRunner
 
 
 def _first_heading(text: str) -> str:
@@ -97,8 +98,20 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
 
         src_dir = Path(__file__).parent          # src/emelya/
         self.app_dir = src_dir.parent.parent    # project root
-        self.skills_dir = self.app_dir / "skills"
-        self.agents_dir = self.app_dir / "agents"
+        # Skills and agents search order: builtin → global → local
+        # Later entries override earlier ones for the same name.
+        global_emelya = Path.home() / ".emelya"
+        local_emelya = config.work_dir / ".emelya"
+        self.skills_dirs = [
+            self.app_dir / "skills",
+            global_emelya / "skills",
+            local_emelya / "skills",
+        ]
+        self.agents_dirs = [
+            self.app_dir / "agents",
+            global_emelya / "agents",
+            local_emelya / "agents",
+        ]
         self.sessions_dir = config.work_dir / ".emelya" / "sessions"
 
         # Models management
@@ -122,14 +135,18 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             work_dir=config.work_dir,
             sandbox=self.sandbox,
             confirm=self._confirm,
-            skills_dir=self.skills_dir,
-            agents_dir=self.agents_dir,
+            skills_dirs=self.skills_dirs,
+            agents_dirs=self.agents_dirs,
             llm_client=self.llm,
             config=config,
             session_log=self.log,
             usage_tracker=self.usage_tracker,
             get_routed_client=self._resolve_client_for_operation,
         )
+
+        # Hooks system
+        self.hook_runner = HookRunner(config.work_dir, llm_getter=self._get_llm_for_hook)
+        self.tool_ctx.hook_runner = self.hook_runner
 
         # Load tools
         self.registry.load_builtin(src_dir)
@@ -149,6 +166,18 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         # Build system prompt
         self._init_system_prompt()
 
+    def _get_llm_for_hook(self, model_name: str):
+        """Return an LLMClient for a hook's prompt call. 'default' uses current client."""
+        if model_name == "default":
+            return self.llm
+        cfg = self._models.get(model_name)
+        if cfg:
+            try:
+                return self._create_llm_client(model_name)
+            except Exception:
+                pass
+        return self.llm
+
     def _session_dir(self, name: str = None) -> Path:
         return self.sessions_dir / (name or self.session_name)
 
@@ -159,7 +188,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
     # --- Setup ---
 
     def _update_dynamic_descriptions(self):
-        skills = scan_skills(self.skills_dir)
+        skills = scan_skills(self.skills_dirs)
         if skills:
             skills_list = ", ".join(f"{k} ({v})" for k, v in skills.items())
             self.registry.update_description(
@@ -167,7 +196,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 f"Load a skill with specialized instructions. Available: {skills_list}",
             )
 
-        agents = scan_agents(self.agents_dir)
+        agents = scan_agents(self.agents_dirs)
         if agents:
             agents_list = ", ".join(f"{k} ({v})" for k, v in agents.items())
             self.registry.update_description(
@@ -551,6 +580,23 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             })
             return "duplicate"
 
+        # PreToolUse hook — may block tool execution
+        if self.tool_ctx.hook_runner:
+            hr = self.tool_ctx.hook_runner.run("PreToolUse", {
+                "tool": tc["name"],
+                "args": tc["args"],
+            })
+            if hr.block:
+                result = f"Blocked by hook: {hr.reason or hr.message or 'hook'}"
+                if hr.message:
+                    print(f"\n  {C.warning}Hook: {hr.message}{C.reset}")
+                self.log.tool_exec(tc["name"], tc["args"], result, 0)
+                self._print_tool_result(tc["name"], result)
+                self.conversation_log.append({"type": "tool_call", "name": tc["name"], "args": tc["args"]})
+                self.conversation_log.append({"type": "tool_result", "name": tc["name"], "content": result})
+                work_messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                return None
+
         t0 = time.monotonic()
         try:
             result = self.registry.execute(tc["name"], tc["args"], self.tool_ctx)
@@ -583,6 +629,18 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 result = plan_result
             except (json.JSONDecodeError, Exception) as e:
                 result = f"Plan execution error: {e}\nRaw plan: {result[:500]}"
+
+        # PostToolUse hook — may substitute the result
+        if self.tool_ctx.hook_runner:
+            hr = self.tool_ctx.hook_runner.run("PostToolUse", {
+                "tool": tc["name"],
+                "args": tc["args"],
+                "result": result,
+            })
+            if hr.result is not None:
+                result = hr.result
+            if hr.message:
+                print(f"\n  {C.warning}Hook: {hr.message}{C.reset}")
 
         self._print_tool_result(tc["name"], result)
         self.conversation_log.append({
@@ -990,6 +1048,10 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             self.config.base_url, self.config.model,
             str(self.config.work_dir), self.session_name,
         )
+        self.hook_runner.run("SessionStart", {
+            "session": self.session_name,
+            "work_dir": str(self.config.work_dir),
+        })
 
         # Resume session if --resume was passed
         if self.config.resume_session:
@@ -998,7 +1060,12 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         # Interactive line editor with per-session history
         self.input_history = InputHistory(str(self._session_dir() / "history"))
         extra_cmds = list(self._custom_commands.keys())
-        editor = LineEditor(work_dir=self.config.work_dir, extra_commands=extra_cmds)
+        editor = LineEditor(
+            work_dir=self.config.work_dir,
+            extra_commands=extra_cmds,
+            agents_dirs=self.agents_dirs,
+            skills_dirs=self.skills_dirs,
+        )
 
         while True:
             try:
@@ -1041,6 +1108,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
     def _cleanup(self):
         """Clean shutdown — stop MCP, close logs."""
         self._shutdown_mcp()
+        self.hook_runner.run("SessionEnd", {"session": self.session_name})
         self.log.session_end()
         self.log.close()
         self.usage_tracker.close()

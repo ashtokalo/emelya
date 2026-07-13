@@ -80,6 +80,18 @@ def execute(args: dict, ctx) -> str:
         if not ctx.confirm(f"Edit {args['path']}", detail):
             return "Cancelled by user"
 
+    # PreWrite hook — may block the edit
+    hook_runner = getattr(ctx, "hook_runner", None)
+    if hook_runner:
+        hr = hook_runner.run("PreWrite", {
+            "path": str(path),
+            "old_string": old_string,
+            "new_string": new_string,
+            "tool": "edit",
+        })
+        if hr.block:
+            return f"Blocked by hook: {hr.reason or hr.message or 'hook'}"
+
     ctx.backup_file(path)
 
     if replace_all:

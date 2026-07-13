@@ -30,14 +30,15 @@ class ToolContext:
     agent_depth: int = 0       # current nesting level (0 = main agent)
     max_agent_depth: int = 3   # max nesting allowed
     # These are set by the REPL for skill/agent tools
-    skills_dir: Path = None
-    agents_dir: Path = None
+    skills_dirs: list = None   # ordered: builtin → global → local
+    agents_dirs: list = None   # ordered: builtin → global → local
     llm_client: object = None
     session_log: object = None  # SessionLog for usage tracking
     usage_tracker: object = None  # UsageTracker for project-wide stats
     tool_registry: object = None
     get_routed_client: Callable = None  # (operation) -> LLMClient or None
     config: object = None
+    hook_runner: object = None  # HookRunner instance, set by REPL
 
     def backup_file(self, path: Path):
         """Save file content to undo stack before modification."""

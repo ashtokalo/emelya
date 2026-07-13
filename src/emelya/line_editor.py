@@ -246,10 +246,13 @@ def path_completer(work_dir, query):
 class LineEditor:
     """Interactive line editor. Buffer is list[str] (single chars + markers)."""
 
-    def __init__(self, work_dir=None, extra_commands=None):
+    def __init__(self, work_dir=None, extra_commands=None,
+                 agents_dirs=None, skills_dirs=None):
         self.work_dir = work_dir or os.getcwd()
         self._prev_wrap_lines = 0
         self._extra_commands = list(extra_commands) if extra_commands else []
+        self._agents_dirs = list(agents_dirs) if agents_dirs else []
+        self._skills_dirs = list(skills_dirs) if skills_dirs else []
 
     def read(self, prompt="You: ", history=None):
         """Read a line. Returns str on Enter, None on Ctrl+C/Escape."""
@@ -560,25 +563,23 @@ class LineEditor:
         query_lower = query.lower()
 
         if kind == "agents":
-            agents_dir = os.path.join(str(self.work_dir), "..", "agents")
-            # Try relative to app dir (agents/ next to src/)
-            for candidate in [
-                os.path.join(str(self.work_dir), "agents"),
+            # Use injected dirs list; fall back to built-in location
+            dirs = self._agents_dirs or [
                 os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents"),
-            ]:
-                if os.path.isdir(candidate):
-                    agents_dir = candidate
-                    break
-            return self._list_md_names(agents_dir, query_lower)
+            ]
+            names: dict[str, None] = {}
+            for d in dirs:
+                names.update({n: None for n in self._list_md_names(str(d), query_lower)})
+            return sorted(names)
 
         if kind == "skills":
-            for candidate in [
-                os.path.join(str(self.work_dir), "skills"),
+            dirs = self._skills_dirs or [
                 os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills"),
-            ]:
-                if os.path.isdir(candidate):
-                    return self._list_md_names(candidate, query_lower)
-            return []
+            ]
+            names: dict[str, None] = {}
+            for d in dirs:
+                names.update({n: None for n in self._list_md_names(str(d), query_lower)})
+            return sorted(names)
 
         if kind == "sessions":
             sessions_dir = os.path.join(str(self.work_dir), ".emelya", "sessions")

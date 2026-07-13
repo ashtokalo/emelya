@@ -420,7 +420,7 @@ class CommandsMixin:
         """Load a skill and inject into current context as user instruction."""
         if not arg:
             from emelya.tools.skill import scan_skills
-            skills = scan_skills(self.skills_dir)
+            skills = scan_skills(self.skills_dirs)
             if skills:
                 print(f"  {t('available')}:")
                 for name, desc in skills.items():
@@ -445,7 +445,7 @@ class CommandsMixin:
         """Run an agent directly from command line."""
         if not arg:
             from emelya.tools.agent import scan_agents
-            agents = scan_agents(self.agents_dir)
+            agents = scan_agents(self.agents_dirs)
             if agents:
                 print(f"  {t('available')}:")
                 for name, desc in agents.items():

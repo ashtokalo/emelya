@@ -21,19 +21,27 @@ DEFINITION = {
 }
 
 
-def scan_skills(skills_dir: Path) -> dict:
-    """Scan skills directory, return {name: description}."""
-    skills = {}
-    if not skills_dir.is_dir():
-        return skills
+def scan_skills(dirs) -> dict:
+    """Scan one or more skills directories, return {name: description}.
 
-    for f in sorted(skills_dir.glob("*.md")):
-        try:
-            content = f.read_text(encoding="utf-8")
-            desc = _extract_description(content) or f.stem
-            skills[f.stem] = desc
-        except Exception:
-            skills[f.stem] = f.stem
+    Accepts a single Path or a list of Paths. When multiple directories are
+    given, later entries override earlier ones for the same skill name
+    (builtin → global → local priority).
+    """
+    if isinstance(dirs, Path):
+        dirs = [dirs]
+    skills = {}
+    for d in dirs:
+        d = Path(d)
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.md")):
+            try:
+                content = f.read_text(encoding="utf-8")
+                desc = _extract_description(content) or f.stem
+                skills[f.stem] = desc
+            except Exception:
+                skills[f.stem] = f.stem
     return skills
 
 
@@ -68,7 +76,8 @@ def _load_body(path: Path) -> str:
 def execute(args: dict, ctx) -> str:
     name = args["name"]
 
-    if not ctx.skills_dir:
+    dirs = ctx.skills_dirs or []
+    if not dirs:
         return "Error: skills directory not configured"
 
     # Normalize: strip .md if provided
@@ -78,9 +87,16 @@ def execute(args: dict, ctx) -> str:
     if name in ctx.loaded_skills:
         return f"Skill '{name}' is already loaded"
 
-    path = ctx.skills_dir / f"{name}.md"
-    if not path.exists():
-        available = scan_skills(ctx.skills_dir)
+    # Search dirs in reverse order so local overrides builtin
+    path = None
+    for d in reversed(dirs):
+        candidate = Path(d) / f"{name}.md"
+        if candidate.exists():
+            path = candidate
+            break
+
+    if path is None:
+        available = scan_skills(dirs)
         avail_list = ", ".join(available.keys()) if available else "none"
         return f"Unknown skill '{name}'. Available: {avail_list}"
 
