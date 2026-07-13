@@ -20,7 +20,7 @@ DEFINITION = {
     },
 }
 
-_TOOLS_DIR = Path(__file__).parent
+_TOOLS_DIR = Path(__file__).parent / "man"
 
 
 def execute(args: dict, ctx) -> str:

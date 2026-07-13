@@ -603,7 +603,7 @@ class TestCustomCommandsGlobal(unittest.TestCase):
 
     def _scan(self):
         # Patch Path.home() so global dir points to our temp home
-        with patch("emelya.commands.Path") as MockPath:
+        with patch("emelya.commands.custom.Path") as MockPath:
             MockPath.home.return_value = self.global_home
             MockPath.side_effect = lambda *a, **kw: Path(*a, **kw)
             return self.repl._scan_custom_commands()
