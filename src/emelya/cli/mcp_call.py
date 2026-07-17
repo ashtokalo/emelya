@@ -11,9 +11,9 @@ def run(work_dir: Path, call_args: list):
     if len(call_args) < 2:
         print("Usage: emelya mcp call <server> <tool> [args]")
         print("Examples:")
-        print("  emelya mcp call shopfans list_orders")
-        print('  emelya mcp call shopfans get_order \'{"id": 123}\'')
-        print("  emelya mcp call shopfans sql_query select version()")
+        print("  emelya mcp call example list_orders")
+        print('  emelya mcp call example get_order \'{"id": 123}\'')
+        print("  emelya mcp call example sql_query select version()")
         sys.exit(1)
 
     srv_name = call_args[0]

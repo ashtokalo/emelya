@@ -87,10 +87,10 @@ HTTP-транспорт работает полностью без внешни�
         "API_KEY": "secret"
       }
     },
-    "shopfans": {
-      "url": "https://app.shopfans.com/admin/api/mcp",
+    "example": {
+      "url": "https://api.example.com/mcp",
       "headers": {
-        "X-Auth-Token": "l_JL-..."
+        "X-Auth-Token": "secret"
       }
     }
   }
@@ -182,14 +182,14 @@ MCP-серверы настраиваются на двух уровнях:
 
 **HTTP-сервер** — URL начинается с `http://` или `https://`, опционально заголовки `KEY=VALUE`:
 ```
-/mcp add shopfans https://example.com/mcp X-Auth-Token=secret
+/mcp add example https://example.com/mcp X-Auth-Token=secret
 /mcp add remote https://api.example.com/mcp Authorization=Bearer\ token
 ```
 
 Из CLI работает аналогично:
 ```
 emelya mcp add playwright -- npx -y @playwright/mcp@latest
-emelya mcp add shopfans https://example.com/mcp X-Auth-Token=secret
+emelya mcp add example https://example.com/mcp X-Auth-Token=secret
 emelya --work-dir /my/project mcp add myserver -- python3 server.py
 ```
 
@@ -202,7 +202,7 @@ emelya mcp list
 
   playwright  [stdio, local]  24 tools
     npx
-  shopfans  [http, global]  7 tools
+  example  [http, global]  7 tools
     https://example.com/mcp
   telegram  [stdio, local]  not cached
     telemcp

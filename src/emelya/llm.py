@@ -7,6 +7,8 @@ import time
 import urllib.error
 import urllib.request
 
+from emelya.proxy import build_proxy_opener
+
 
 class LLMError(Exception):
     pass
@@ -17,24 +19,38 @@ class LLMClient:
 
     def __init__(self, base_url: str, model: str = "default",
                  api_key: str = None,
-                 retry: int = 2, retry_delay: float = 2.0):
+                 retry: int = 2, retry_delay: float = 2.0,
+                 proxy: str = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.retry = retry
         self.retry_delay = retry_delay
+        self.proxy = proxy
+        try:
+            self._opener = build_proxy_opener(proxy) if proxy else None
+        except ValueError as e:
+            raise LLMError(str(e)) from e
+
+    def _urlopen(self, req, timeout: int = 120):
+        """Open URL through proxy opener if configured, otherwise direct."""
+        if self._opener:
+            return self._opener.open(req, timeout=timeout)
+        return urllib.request.urlopen(req, timeout=timeout)
 
     def check_connection(self) -> tuple:
         """Check server availability. Returns (ok, info_message).
         Also sets self.detected_context_limit if discoverable."""
         self.detected_context_limit = None
 
+        last_error = None
+
         # Try /v1/models (OpenAI-compatible)
         try:
             req = urllib.request.Request(f"{self.base_url}/v1/models")
             if self.api_key:
                 req.add_header("Authorization", f"Bearer {self.api_key}")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with self._urlopen(req, timeout=10) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     models = data.get("data", [])
@@ -51,30 +67,33 @@ class LLMClient:
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 return False, "Authentication failed (invalid API key)"
-        except Exception:
-            pass
+            last_error = f"HTTP {e.code}"
+        except Exception as e:
+            last_error = str(e)
 
         # Try /props (llama.cpp — returns n_ctx)
         try:
             req = urllib.request.Request(f"{self.base_url}/props")
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with self._urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     n_ctx = data.get("n_ctx")
                     if n_ctx and isinstance(n_ctx, int):
                         self.detected_context_limit = n_ctx
-        except Exception:
-            pass
+        except Exception as e:
+            last_error = last_error or str(e)
 
         # Fallback: /health (llama.cpp)
         try:
             req = urllib.request.Request(f"{self.base_url}/health")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with self._urlopen(req, timeout=10) as resp:
                 if resp.status == 200:
                     return True, "OK"
-        except Exception:
-            pass
-        return False, "Server unavailable"
+        except Exception as e:
+            last_error = last_error or str(e)
+
+        reason = f": {last_error}" if last_error else ""
+        return False, f"Server unavailable{reason}"
 
     def _post(self, url: str, data: dict, timeout: int = 120):
         """Raw POST, returns http.client.HTTPResponse (not closed)."""
@@ -85,7 +104,7 @@ class LLMClient:
         req = urllib.request.Request(
             url, data=body, headers=headers, method="POST",
         )
-        return urllib.request.urlopen(req, timeout=timeout)
+        return self._urlopen(req, timeout=timeout)
 
     def _post_json(self, url: str, data: dict, timeout: int = 120) -> dict:
         """POST and parse JSON response."""

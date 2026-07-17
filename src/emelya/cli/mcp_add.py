@@ -15,7 +15,7 @@ def run(work_dir: Path, add_args: list):
         print("  emelya mcp add <name> <url> [KEY=VALUE ...]    (HTTP)")
         print("Examples:")
         print("  emelya mcp add playwright -- npx -y @playwright/mcp@latest")
-        print("  emelya mcp add shopfans https://example.com/mcp X-Auth-Token=secret")
+        print("  emelya mcp add example https://example.com/mcp X-Auth-Token=secret")
         sys.exit(1)
 
     try:

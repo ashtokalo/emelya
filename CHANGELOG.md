@@ -31,6 +31,23 @@ All notable changes to this project will be documented in this file.
   - `emelya mcp help` / `emelya mcp --help` / `emelya mcp` — usage reference.
   - All subcommands respect `--work-dir`.
 
+### Changed
+- **Exit synonyms** — `exit`, `quit`, `выход`, `пока` (and typo variants) are accepted as `/exit` without the slash, case- and whitespace-insensitive.
+- **No startup noise** — removed "model unavailable" warning and MCP tool-count message on startup.
+
+## [0.5.2.1] - 2026-07-17
+
+### Added
+- **Per-model proxy** — each model in `models.json` accepts an optional `"proxy"` field. Supported schemes: `http://`, `socks5://`, `socks5h://` (remote DNS). Credentials are optional: `socks5://user:pass@host:port`.
+- **Named proxies** — top-level `"proxies"` object in `models.json` lets multiple models share one proxy config by name instead of repeating the URL.
+- **Environment variable proxy fallback** — when a model has no explicit `"proxy"`, emelya checks `HTTPS_PROXY`, `ALL_PROXY`, `HTTP_PROXY` (and lowercase variants) in that order. `ALL_PROXY=socks5://...` is handled correctly, unlike stdlib urllib which ignores it.
+- **Built-in SOCKS5 implementation** — no external dependencies. Full RFC 1928 + RFC 1929 (username/password auth). DNS resolution always happens on the proxy side (equivalent to `socks5h://`).
+
+### Changed
+- **Model switch error handling** — `/model <name>` now catches proxy or connection errors and shows a readable message instead of a traceback; the active model is not changed on failure.
+- **Connection diagnostics** — "Server unavailable" warning now includes the actual error reason (e.g. `SOCKS5: authentication failed`, `[Errno 111] Connection refused`).
+- **Model display name** — switching to a cloud model with a specific model ID (e.g. `gpt-4o`) no longer replaces the display name with the first entry from `/v1/models`; the configured model name is shown instead.
+
 ## [0.5.1] - 2026-06-22
 
 ### Added

@@ -32,6 +32,7 @@ Emelya поддерживает несколько LLM-моделей однов
 | `api_key` | string | нет | API-ключ (Bearer token). Файл получает права `0600` при сохранении |
 | `context_limit` | integer | нет | Лимит токенов контекста. Если не задан — автоопределение или 4096 |
 | `max_tokens` | integer | нет | Максимум токенов в ответе. Default: 8192 |
+| `proxy` | string | нет | Прокси для этой модели: URL (`socks5://...`) или имя из `proxies` |
 
 ### Поддерживаемые провайдеры
 
@@ -47,12 +48,16 @@ Emelya поддерживает несколько LLM-моделей однов
 
 ```json
 {
+  "proxies": {
+    "vpn": "socks5://user:pass@proxy.example.com:1080"
+  },
   "models": {
     "gpt4": {
       "base_url": "https://api.openai.com",
       "model": "gpt-4o",
       "api_key": "sk-...",
-      "context_limit": 128000
+      "context_limit": 128000,
+      "proxy": "vpn"
     },
     "deepseek": {
       "base_url": "https://api.deepseek.com",
@@ -141,6 +146,62 @@ emelya --base-url http://localhost:8080 --model mymodel
 - Только read-only tools (`read`, `glob`, `grep`) → `agent_light`
 - Есть write-tools → `agent`
 - Агент с именем `planner` → `planner`
+
+---
+
+## Прокси
+
+### Прокси для модели
+
+Каждой модели можно назначить прокси через поле `proxy`. Значение — либо прямой URL,
+либо имя из секции `proxies` (удобно, когда несколько моделей используют один прокси).
+
+```json
+{
+  "proxies": {
+    "vpn": "socks5://user:pass@proxy.example.com:1080"
+  },
+  "models": {
+    "openai": {
+      "proxy": "vpn"
+    },
+    "other": {
+      "proxy": "http://corp-proxy:8080"
+    }
+  }
+}
+```
+
+### Поддерживаемые схемы прокси
+
+| Схема | Описание |
+|-------|----------|
+| `http://[user:pass@]host:port` | HTTP CONNECT прокси |
+| `socks5://[user:pass@]host:port` | SOCKS5, резолвинг через прокси |
+| `socks5h://[user:pass@]host:port` | То же, что `socks5://` — резолвинг всегда на стороне прокси |
+
+Реализация SOCKS5 встроена, внешние зависимости не требуются.
+
+### Переменные окружения
+
+Если у модели не задан `proxy`, применяются переменные окружения (в порядке приоритета):
+
+| Переменная | Описание |
+|------------|----------|
+| `HTTPS_PROXY` / `https_proxy` | Прокси для HTTPS-соединений |
+| `ALL_PROXY` / `all_proxy` | Универсальный прокси (поддерживает `socks5://`) |
+| `HTTP_PROXY` / `http_proxy` | Прокси для HTTP-соединений |
+
+Переменная окружения применяется ко всем моделям без явного `proxy`.
+Явный `proxy` в конфиге модели всегда имеет приоритет над переменными окружения.
+
+```bash
+# Пустить весь трафик через SOCKS5
+ALL_PROXY=socks5://proxy.example.com:1080 emelya
+
+# HTTP-прокси для всех моделей без явного proxy
+HTTPS_PROXY=http://corp-proxy:8080 emelya
+```
 
 ---
 

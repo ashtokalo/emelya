@@ -331,7 +331,7 @@ class MCPMixin:
             print("    /mcp add <name> <url> [KEY=VALUE ...]    (HTTP)")
             print("  Examples:")
             print("    /mcp add playwright -- npx -y @playwright/mcp@latest")
-            print("    /mcp add shopfans https://example.com/mcp X-Auth-Token=secret")
+            print("    /mcp add example https://example.com/mcp X-Auth-Token=secret")
             return
 
         import shlex
@@ -487,9 +487,9 @@ class MCPMixin:
         if not arg:
             print("  Usage: /mcp call <server_name> <tool_name> [args]")
             print("  Examples:")
-            print("    /mcp call shopfans list_orders")
-            print('    /mcp call shopfans get_order {"id": 123}')
-            print("    /mcp call shopfans search some query text")
+            print("    /mcp call example list_orders")
+            print('    /mcp call example get_order {"id": 123}')
+            print("    /mcp call example search some query text")
             return
 
         parts = arg.split(None, 2)

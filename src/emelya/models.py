@@ -1,6 +1,7 @@
 """Model management mixin — multi-model support, routing, failover chains."""
 
 import json
+import os
 from pathlib import Path
 
 from emelya.i18n import t
@@ -41,6 +42,7 @@ class ModelMixin:
             }
         }
         self._routing = {}  # operation → [model_name, ...]
+        self._proxies = {}  # proxy_name → proxy_url
         config_paths = [
             Path.home() / ".emelya" / "models.json",
             self._models_path,
@@ -51,9 +53,35 @@ class ModelMixin:
                     data = json.loads(path.read_text(encoding="utf-8"))
                     models.update(data.get("models", {}))
                     self._routing.update(data.get("routing", {}))
+                    self._proxies.update(data.get("proxies", {}))
                 except (json.JSONDecodeError, OSError):
                     pass
         return models
+
+    # Env variables checked when no explicit proxy is configured (in priority order)
+    _PROXY_ENV_VARS = (
+        "HTTPS_PROXY", "https_proxy",
+        "ALL_PROXY", "all_proxy",
+        "HTTP_PROXY", "http_proxy",
+    )
+
+    def _resolve_proxy(self, cfg: dict) -> str | None:
+        """Resolve model proxy: explicit config > named proxy > environment variables."""
+        proxy = cfg.get("proxy")
+        if proxy:
+            if proxy.startswith(("http://", "https://", "socks4://", "socks5://")):
+                return proxy
+            # Named proxy → look up in proxies dict
+            resolved = self._proxies.get(proxy)
+            if not resolved:
+                print(f"  Warning: proxy '{proxy}' not defined in proxies config")
+            return resolved
+        # No explicit proxy — fall back to environment variables
+        for var in self._PROXY_ENV_VARS:
+            value = os.environ.get(var)
+            if value:
+                return value
+        return None
 
     def _save_models(self):
         """Save models config (excluding 'local' which comes from CLI)."""
@@ -61,6 +89,8 @@ class ModelMixin:
         data = {"models": to_save}
         if self._routing:
             data["routing"] = self._routing
+        if self._proxies:
+            data["proxies"] = self._proxies
         self._models_path.parent.mkdir(parents=True, exist_ok=True)
         self._models_path.write_text(
             json.dumps(data, indent=2, ensure_ascii=False),
@@ -85,6 +115,7 @@ class ModelMixin:
             base_url=cfg.get("base_url", self.config.base_url),
             model=cfg.get("model", "default"),
             api_key=cfg.get("api_key"),
+            proxy=self._resolve_proxy(cfg),
         )
         self._client_cache[model_name] = client
         return client
@@ -167,6 +198,7 @@ class ModelMixin:
             base_url=cfg.get("base_url", self.config.base_url),
             model=cfg.get("model", "default"),
             api_key=cfg.get("api_key"),
+            proxy=self._resolve_proxy(cfg),
         )
 
     def _switch_model(self, name: str):
@@ -184,15 +216,28 @@ class ModelMixin:
         self.active_model = name
         self._model_display = name
         self._manual_model = True  # disable routing
-        self.llm = self._create_llm_client()
+        try:
+            self.llm = self._create_llm_client()
+        except LLMError as e:
+            self.active_model = prev
+            self._model_display = prev
+            self._manual_model = False
+            print(f"  Error: {e}")
+            return
         self.tool_ctx.llm_client = self.llm
         self.log.event(f"Model switched: {prev} -> {name} ({self.llm.base_url} / {self.llm.model})")
         ok, info = self.llm.check_connection()
         if ok:
-            self._update_model_display(info)
+            cfg = self._models.get(name, {})
+            configured_model = cfg.get("model", "default")
+            if configured_model == "default":
+                # Local server: use whatever the server reports
+                self._update_model_display(info)
+            else:
+                # Cloud API: keep the configured model name
+                self._model_display = strip_model_suffix(configured_model)
             # Apply detected context limit if no explicit override
             detected = getattr(self.llm, "detected_context_limit", None)
-            cfg = self._models.get(name, {})
             if detected and not cfg.get("context_limit"):
                 self.context.context_limit = detected
             print(f"  {t('switched_to')}: {self._model_display}, ctx:{self.context.context_limit // 1000}K")
@@ -278,7 +323,8 @@ class ModelMixin:
         self._save_models()
 
         # Test connection
-        client = LLMClient(base_url=base_url, model=model, api_key=api_key)
+        client = LLMClient(base_url=base_url, model=model, api_key=api_key,
+                           proxy=self._resolve_proxy(entry))
         ok, msg = client.check_connection()
         status = "connected" if ok else f"warning: {msg}"
         print(f"  Added: {name} ({base_url} / {model}) — {status}")
