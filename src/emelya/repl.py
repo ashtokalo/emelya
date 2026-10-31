@@ -413,10 +413,28 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             return base + " User comment: " + self._last_cancellation_comment
         return base
 
-    def _run_shell_escape(self, command: str) -> int:
-        """Run an explicit user command with direct terminal access."""
+    def _last_assistant_text(self) -> str:
+        """Return the latest model text exactly as stored in conversation."""
+        for message in reversed(getattr(self.context, "messages", [])):
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                return content
+            if isinstance(content, list):
+                parts = [
+                    item.get("text", "") for item in content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                ]
+                text = "".join(parts)
+                if text:
+                    return text
+        return ""
+
+    def _run_shell_escape(self, command: str, stdin_text: str | None = None) -> int:
+        """Run an explicit user command, optionally feeding model text to stdin."""
         if not command.strip():
-            print("  Usage: !<command>")
+            print("  Usage: !<command> or !|<command>")
             return 2
         try:
             try:
@@ -425,7 +443,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 words = command.split()
             executable = Path(words[0]).name if words else ""
             interactive = executable in _INTERACTIVE_SHELL_COMMANDS
-            if interactive:
+            if interactive and stdin_text is None:
                 completed = subprocess.run(
                     command, shell=True, cwd=str(self.config.work_dir),
                 )
@@ -433,7 +451,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             else:
                 completed = subprocess.run(
                     command, shell=True, cwd=str(self.config.work_dir),
-                    capture_output=True, text=True, errors="replace",
+                    input=stdin_text, capture_output=True, text=True, errors="replace",
                 )
                 stdout, stderr = completed.stdout or "", completed.stderr or ""
                 if stdout:
@@ -443,7 +461,8 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             if completed.returncode != 0:
                 print(f"  [exit {completed.returncode}]")
             self._record_shell_escape(
-                command, completed.returncode, stdout, stderr, interactive,
+                command, completed.returncode, stdout, stderr,
+                interactive and stdin_text is None,
             )
             return completed.returncode
         except KeyboardInterrupt:
@@ -1358,6 +1377,17 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
 
             # Explicit shell escape — user-authorized, outside model context.
             # Inherited stdio lets full-screen programs (mc, vim, htop) own TTY.
+            if user_input.startswith("!|"):
+                command = user_input[2:].lstrip()
+                if not command:
+                    self._run_shell_escape("")
+                    continue
+                model_text = self._last_assistant_text()
+                if not model_text:
+                    print("  No previous model response to pipe.")
+                    continue
+                self._run_shell_escape(command, stdin_text=model_text)
+                continue
             if user_input.startswith("!"):
                 self._run_shell_escape(user_input[1:].lstrip())
                 continue

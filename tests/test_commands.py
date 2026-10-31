@@ -77,13 +77,41 @@ class TestShellEscape(unittest.TestCase):
             self.assertEqual(repl._run_shell_escape("ls"), 0)
         run.assert_called_once_with(
             "ls", shell=True, cwd="/tmp/project",
-            capture_output=True, text=True, errors="replace",
+            input=None, capture_output=True, text=True, errors="replace",
         )
         memory_details = repl.memory_store.put.call_args.kwargs["details"]
         context_entry = repl.context.messages[-1]["content"]
         self.assertIn("secret output", memory_details)
         self.assertNotIn("secret output", context_entry)
         self.assertIn("memory(action=get, id=mem-shell-2)", context_entry)
+
+    def test_pipes_last_raw_assistant_response_to_command(self):
+        repl = REPL.__new__(REPL)
+        repl.config = MagicMock(work_dir=Path("/tmp/project"))
+        repl.context = Context()
+        repl.context.add_user("question")
+        repl.context.add_assistant_text("# Heading\n\n**bold** text")
+        repl.conversation_log = []
+        repl._autosave = MagicMock()
+        repl.memory_store = MagicMock()
+        repl.memory_store.put.return_value = {"id": "mem-shell-3"}
+        completed = MagicMock(returncode=0, stdout="rendered\n", stderr="")
+        with patch("emelya.repl.subprocess.run", return_value=completed) as run, \
+                patch("builtins.print"):
+            text = repl._last_assistant_text()
+            self.assertEqual(repl._run_shell_escape("glow", stdin_text=text), 0)
+        run.assert_called_once_with(
+            "glow", shell=True, cwd="/tmp/project",
+            input="# Heading\n\n**bold** text",
+            capture_output=True, text=True, errors="replace",
+        )
+
+    def test_last_assistant_response_ignores_later_shell_context(self):
+        repl = REPL.__new__(REPL)
+        repl.context = Context()
+        repl.context.add_assistant_text("answer")
+        repl.context.add_user("<user_shell_command>...</user_shell_command>")
+        self.assertEqual(repl._last_assistant_text(), "answer")
 
 
 class MockREPL(ModelMixin, MCPMixin, CommandsMixin):

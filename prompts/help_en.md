@@ -40,6 +40,7 @@
   /history               — full context dump
   /exit                  — exit
   !<command>             — run a shell command directly (interactive TTY supported)
+  !|<command>            — pipe the last raw model response to stdin (for example, !|glow)
 
   Tips:
 

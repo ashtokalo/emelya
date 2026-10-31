@@ -208,6 +208,7 @@ Instructions loaded into context on demand. Model decides when to load them.
 | `/history` | Dump full context |
 | `/exit` | Exit |
 | `!<command>` | Run directly; output is stored in session memory and referenced from conversation context |
+| `!|<command>` | Pipe the last raw model response to the command's stdin, e.g. `!|glow` |
 
 ## CLI Arguments
 
