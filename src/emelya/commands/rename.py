@@ -13,10 +13,16 @@ def _cmd_rename(self, name: str = ""):
         return
 
     old_name = self.session_name
+    old_session_dir = self.sessions_dir / old_name
     self.session_name = name
     session_dir = self._session_dir()
 
     self.context.save(session_dir / "context.json")
+    for dirname in ("memory", "tasks"):
+        old_state = old_session_dir / dirname
+        new_state = session_dir / dirname
+        if old_state.is_dir() and old_state != new_state:
+            shutil.copytree(old_state, new_state, dirs_exist_ok=True)
 
     self.log.event(f"Session renamed: {old_name} -> {name}")
     old_log_path = self.log.path

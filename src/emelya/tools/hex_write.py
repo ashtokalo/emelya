@@ -54,7 +54,7 @@ def execute(args: dict, ctx) -> str:
 
     if ctx.confirm and path.exists():
         if not ctx.confirm(f"Patch {args['path']}", f"{len(data)} bytes at offset {offset:#x}"):
-            return "Cancelled by user"
+            return ctx.cancellation_result()
 
     ctx.backup_file(path)
 

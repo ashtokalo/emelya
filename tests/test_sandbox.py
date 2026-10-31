@@ -94,5 +94,61 @@ class TestSandboxExtraAllowed(unittest.TestCase):
             sandbox.validate("/etc/passwd")
 
 
+class TestSandboxInteractiveAccess(unittest.TestCase):
+
+    def setUp(self):
+        self.workdir = Path(tempfile.mkdtemp())
+
+    def test_allow_once_is_reused_within_tool_scope_only(self):
+        decisions = iter(("once", "deny"))
+        requested = []
+
+        def request(path):
+            requested.append(path)
+            return next(decisions)
+
+        sandbox = Sandbox(self.workdir, request_access=request)
+        sandbox.begin_access_scope()
+        self.assertEqual(sandbox.validate("/etc/passwd"), Path("/etc/passwd"))
+        self.assertEqual(sandbox.validate("/etc/passwd"), Path("/etc/passwd"))
+        sandbox.end_access_scope()
+        with self.assertRaises(PermissionError):
+            sandbox.validate("/etc/passwd")
+        self.assertEqual(len(requested), 2)
+
+    def test_allow_for_session_does_not_prompt_again(self):
+        requested = []
+
+        def request(path):
+            requested.append(path)
+            return "session"
+
+        sandbox = Sandbox(self.workdir, request_access=request)
+        sandbox.begin_access_scope()
+        sandbox.validate("/etc/passwd")
+        sandbox.end_access_scope()
+        sandbox.begin_access_scope()
+        sandbox.validate("/etc/passwd")
+        sandbox.end_access_scope()
+        self.assertEqual(len(requested), 1)
+
+    def test_deny_keeps_path_blocked(self):
+        sandbox = Sandbox(self.workdir, request_access=lambda path: "deny")
+        with self.assertRaises(PermissionError):
+            sandbox.validate("/etc/passwd")
+
+    def test_directory_grant_includes_children(self):
+        requested = []
+
+        def request(path):
+            requested.append(path)
+            return "session"
+
+        sandbox = Sandbox(self.workdir, request_access=request)
+        sandbox.validate("/etc")
+        self.assertEqual(sandbox.validate("/etc/passwd"), Path("/etc/passwd"))
+        self.assertEqual(len(requested), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

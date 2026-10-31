@@ -1,6 +1,7 @@
 """Sandbox — path validation for file operations."""
 
 import os
+import threading
 from pathlib import Path
 
 
@@ -9,12 +10,44 @@ class Sandbox:
 
     ALLOWED_PREFIXES = ["/tmp"]
 
-    def __init__(self, work_dir: Path, extra_allowed: list = None):
+    def __init__(self, work_dir: Path, extra_allowed: list = None,
+                 request_access=None):
         self.work_dir = work_dir.resolve()
         self._allowed = list(self.ALLOWED_PREFIXES)
+        self._request_access = request_access
+        self._session_grants = []  # [(resolved Path, includes_children)]
+        self._scope = threading.local()
         if extra_allowed:
             for p in extra_allowed:
                 self._allowed.append(str(Path(p).resolve()))
+
+    def begin_access_scope(self):
+        """Begin one tool call; one-time grants live until its completion."""
+        self._scope.active = True
+        self._scope.grants = []
+
+    def end_access_scope(self):
+        """Discard one-time grants for the current tool call/thread."""
+        self._scope.active = False
+        self._scope.grants = []
+
+    @staticmethod
+    def _matches_grant(resolved: Path, grant) -> bool:
+        path, includes_children = grant
+        if resolved == path:
+            return True
+        if includes_children:
+            try:
+                resolved.relative_to(path)
+                return True
+            except ValueError:
+                pass
+        return False
+
+    def _is_granted(self, resolved: Path) -> bool:
+        grants = list(self._session_grants)
+        grants.extend(getattr(self._scope, "grants", []))
+        return any(self._matches_grant(resolved, grant) for grant in grants)
 
     def validate(self, path: str) -> Path:
         """Resolve path relative to work_dir and verify it's within sandbox.
@@ -39,6 +72,21 @@ class Sandbox:
         resolved_str = str(resolved)
         for prefix in self._allowed:
             if resolved_str == prefix or resolved_str.startswith(prefix + os.sep):
+                return resolved
+
+        if self._is_granted(resolved):
+            return resolved
+
+        if self._request_access:
+            decision = self._request_access(resolved)
+            includes_children = resolved.is_dir()
+            grant = (resolved, includes_children)
+            if decision == "session":
+                self._session_grants.append(grant)
+                return resolved
+            if decision == "once":
+                if getattr(self._scope, "active", False):
+                    self._scope.grants.append(grant)
                 return resolved
 
         raise PermissionError(

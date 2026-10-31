@@ -16,10 +16,12 @@ from emelya.input_history import InputHistory
 from emelya.line_editor import LineEditor, strip_markers
 from emelya.llm import LLMClient, LLMError
 from emelya.log import SessionLog, UsageTracker
+from emelya.memory import FileMemoryStore
 from emelya.sandbox import Sandbox
+from emelya.task_store import FileTaskStore
 from emelya.tools import ToolContext, ToolRegistry
 from emelya.tools.skill import scan_skills
-from emelya.tools.agent import scan_agents
+from emelya.tools.agent import scan_agents, _detect_task_language
 
 from emelya.models import ModelMixin
 from emelya.mcp_manager import MCPMixin
@@ -91,9 +93,15 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
     def __init__(self, config: Config):
         self.config = config
         self.context = Context(context_limit=config.context_limit)
+        self._external_access_lock = threading.Lock()
+        self._last_cancellation_comment = ""
         global_memory = Path.home() / ".emelya" / "memory"
         extra_allowed = [global_memory] if global_memory.is_dir() else []
-        self.sandbox = Sandbox(config.work_dir, extra_allowed=extra_allowed)
+        self.sandbox = Sandbox(
+            config.work_dir,
+            extra_allowed=extra_allowed,
+            request_access=self._request_external_access,
+        )
         self.registry = ToolRegistry()
 
         src_dir = Path(__file__).parent          # src/emelya/
@@ -129,12 +137,19 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         self.session_name = datetime.now().strftime("tmp%Y%m%d%H%M%S")
         self.log = self._create_log()
         self.usage_tracker = UsageTracker(config.work_dir / ".emelya" / "usage.jsonl")
+        self.memory_store = FileMemoryStore(
+            lambda: self._session_dir() / "memory"
+        )
+        self.task_store = FileTaskStore(
+            lambda: self._session_dir() / "tasks"
+        )
 
         # Tool context shared across calls
         self.tool_ctx = ToolContext(
             work_dir=config.work_dir,
             sandbox=self.sandbox,
             confirm=self._confirm,
+            get_cancellation_result=self._get_cancellation_result,
             skills_dirs=self.skills_dirs,
             agents_dirs=self.agents_dirs,
             llm_client=self.llm,
@@ -142,6 +157,8 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             session_log=self.log,
             usage_tracker=self.usage_tracker,
             get_routed_client=self._resolve_client_for_operation,
+            memory_store=self.memory_store,
+            task_store=self.task_store,
         )
 
         # Hooks system
@@ -287,15 +304,46 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
 
     # --- Agent loop ---
 
+    def _request_external_access(self, path: Path) -> str:
+        """Ask whether an out-of-sandbox path may be used."""
+        # Read-only tools may execute in parallel; never overlap terminal prompts.
+        with self._external_access_lock:
+            print(f"\n  {C.warning}{t('external_access', path=str(path))}{C.reset}")
+            try:
+                answer = input(f"  {C.warning}{t('external_access_choices')}{C.reset} ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return "deny"
+        if answer in ("y", "yes", "д", "да"):
+            return "once"
+        if answer in ("a", "always", "в", "всегда"):
+            return "session"
+        return "deny"
+
     def _confirm(self, description: str, detail: str = "") -> bool:
-        """Ask user for confirmation. Respects confirm_mode."""
+        """Ask user to allow, deny, or deny with model-facing feedback."""
+        self._last_cancellation_comment = ""
         if self.config.confirm_mode == "no_confirm":
             return True
         try:
-            answer = input(f"  {C.warning}{t('allow')}:{C.reset} ").strip().lower()
-            return answer in ("y", "yes", "д", "да")
+            answer = input(f"  {C.warning}{t('confirm_choices')}{C.reset} ").strip().lower()
+            if answer in ("y", "yes", "д", "да"):
+                return True
+            if answer in ("c", "comment", "к", "комментарий"):
+                self._last_cancellation_comment = input(
+                    f"  {C.warning}{t('cancel_comment_prompt')}{C.reset} "
+                ).strip()
+            return False
         except (EOFError, KeyboardInterrupt):
             return False
+
+    def _get_cancellation_result(self) -> str:
+        base = (
+            "Error: operation cancelled by user. "
+            "The command was NOT executed and no changes were made."
+        )
+        if self._last_cancellation_comment:
+            return base + " User comment: " + self._last_cancellation_comment
+        return base
 
     def _short_path(self, path: str) -> str:
         """Strip work_dir prefix from path for cleaner display."""
@@ -315,12 +363,8 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             print(f"  {C.muted}  $ {cmd}{C.reset}")
         elif name == "read":
             print(f"\n  {C.tool_call}● {t('tool_read', path=self._short_path(args.get('path', '')))}{C.reset}")
-        elif name == "write":
-            self._print_write_preview(self._short_path(args.get("path", "")), args.get("content", ""))
         elif name == "edit":
-            edit_args = dict(args)
-            edit_args["path"] = self._short_path(edit_args.get("path", ""))
-            self._print_edit_diff(edit_args)
+            self._print_edit_diff(args)
         elif name == "glob":
             print(f"\n  {C.tool_call}● {t('tool_glob', pattern=args.get('pattern', ''))}{C.reset}")
         elif name == "grep":
@@ -345,94 +389,36 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             detail = str(args)[:80] if args else ""
             print(f"\n  {C.tool_call}● {t('tool_other', name=name)}({detail}){C.reset}")
 
-    def _print_write_preview(self, path: str, content: str):
-        """Show write preview with first lines of content."""
-        lines = content.splitlines() if content else []
-        n_lines = len(lines)
-        print(f"\n  {C.tool_call}● {t('tool_write', path=path)}{C.reset}")
-        print(f"  ⎿  {t('tool_n_lines', n=n_lines)}")
-        max_preview = 10
-        for i, line in enumerate(lines[:max_preview]):
-            print(f"  {C.diff_add}  {i + 1:4}  {line}{C.reset}")
-        if n_lines > max_preview:
-            print(f"  {C.muted}  {t('tool_more_lines', n=n_lines - max_preview)}{C.reset}")
-
     def _print_edit_diff(self, args: dict):
-        """Show a compact diff for edit tool calls with line numbers."""
+        """Show a bounded summary for atomic structured edits."""
         import difflib
-        path = args.get("path", "")
-        old = args.get("old_string", "")
-        new = args.get("new_string", "")
-        old_lines = old.splitlines()
-        new_lines = new.splitlines()
-
-        # Count added/removed
-        n_added = sum(1 for l in difflib.unified_diff(old_lines, new_lines, n=0, lineterm="")
-                      if l.startswith("+") and not l.startswith("+++"))
-        n_removed = sum(1 for l in difflib.unified_diff(old_lines, new_lines, n=0, lineterm="")
-                        if l.startswith("-") and not l.startswith("---"))
-        parts = []
-        if n_added:
-            parts.append(t("tool_added", n=n_added))
-        if n_removed:
-            parts.append(t("tool_removed", n=n_removed))
-        if not n_added and not n_removed:
-            parts.append(t("tool_changed", n=len(old_lines)))
-        summary = ", ".join(parts)
-
-        print(f"\n  {C.tool_call}● {t('tool_edit', path=path)}{C.reset}")
-        print(f"  ⎿  {summary}")
-
-        # Find the starting line number in the actual file
-        start_line = 1
-        try:
-            resolved = self.sandbox.validate(path)
-            if resolved.exists():
-                file_text = resolved.read_text(encoding="utf-8", errors="replace")
-                idx = file_text.find(old)
-                if idx >= 0:
-                    start_line = file_text[:idx].count("\n") + 1
-        except Exception:
-            pass
-
-        # Build diff with line numbers
-        diff = list(difflib.unified_diff(old_lines, new_lines, n=2, lineterm=""))
-        if not diff:
-            return
-
-        max_diff_lines = 20
-        shown = 0
-        old_num = start_line
-        new_num = start_line
-        for line in diff:
-            if line.startswith("---") or line.startswith("+++"):
-                continue
-            if line.startswith("@@"):
-                continue
-            if shown >= max_diff_lines:
-                remaining = len([l for l in diff if l and l[0] in "+-  " and not l.startswith(("---", "+++"))]) - shown
-                if remaining > 0:
-                    print(f"  {C.muted}  {t('tool_more_lines', n=remaining)}{C.reset}")
-                break
-            if line.startswith("-"):
-                print(f"  {C.diff_del}  {old_num:4} - {line[1:]}{C.reset}")
-                old_num += 1
-            elif line.startswith("+"):
-                print(f"  {C.diff_add}  {new_num:4} + {line[1:]}{C.reset}")
-                new_num += 1
+        changes = args.get("changes", [])
+        print(f"\n  {C.tool_call}● {t('tool_edit', path=f'{len(changes)} change(s)')}{C.reset}")
+        for change in changes[:10]:
+            operations = [name for name in ("update", "write", "create", "delete")
+                          if name in change]
+            op = operations[0] if operations else "?"
+            path = self._short_path(change.get(op, ""))
+            if op == "update":
+                old_lines = change.get("old_string", "").splitlines()
+                new_lines = change.get("new_string", "").splitlines()
+                diff = list(difflib.ndiff(old_lines, new_lines))
+                added = sum(1 for line in diff if line.startswith("+ "))
+                removed = sum(1 for line in diff if line.startswith("- "))
+                detail = f"+{added} -{removed}"
+            elif op in ("write", "create"):
+                detail = f"+{len(change.get('content', '').splitlines())}"
             else:
-                print(f"  {C.diff_ctx}  {old_num:4}   {line[1:]}{C.reset}")
-                old_num += 1
-                new_num += 1
-            shown += 1
+                detail = "delete"
+            print(f"  {C.muted}  {path} ({detail}){C.reset}")
+        if len(changes) > 10:
+            print(f"  {C.muted}  {t('tool_more_lines', n=len(changes) - 10)}{C.reset}")
 
     def _print_tool_result(self, name: str, result: str):
         """Display tool result (abbreviated). Limits lines, chars per line, and total chars."""
-        # Suppress redundant success messages for edit/write — diff/preview already shown
+        # Suppress redundant edit success — the preview is already shown
         if not result.startswith("Error:") and not result.startswith("Cancel"):
-            if name == "edit" and result.startswith("Replaced "):
-                return
-            if name == "write" and result.startswith("Written "):
+            if name == "edit" and result.startswith("Applied edits:"):
                 return
             # For read — strip [Lines ...] footer, show content lines only
             if name == "read" and not result.startswith("Error:"):
@@ -723,6 +709,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         Tool calls and results live in a temporary work context.
         Only user input and final text response go into the main context.
         """
+        self.tool_ctx.user_language = _detect_task_language(user_input)
         self.context.add_user(user_input)
         self.conversation_log.append({"type": "user", "content": user_input})
 
@@ -867,47 +854,114 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         self._autosave()
 
     def _execute_plan(self, steps: list) -> str:
-        """Execute a plan created by planner agent. Returns summary."""
+        """Execute a planner result with persistent tasks and shared memory."""
         if not steps:
             return "Empty plan"
 
         tmp_dir = self._session_dir() / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        results = {}  # output_file → {"size": N, "ok": bool}
+        results = {}  # output_file → execution metadata
         failed_outputs = set()  # output files from failed steps
         total = len(steps)
         completed = 0
+        final_result = ""
 
-        for i, step in enumerate(steps):
-            desc = step.get("description", f"Step {i + 1}")
+        # Validate the complete plan before creating persistent tasks. A malformed
+        # later step must not leave an apparently runnable partial plan behind.
+        normalized_steps = []
+        seen_outputs = set()
+        for i, original in enumerate(steps):
+            step = dict(original)
+            desc = step.get("description") or f"Step {i + 1}"
+            if bool(step.get("agent")) == bool(step.get("tool")):
+                return f"Error: plan step {i + 1} must provide exactly one agent or tool"
+            output_file = step.get("output") or f"step-{i + 1:02d}.txt"
+            if output_file in seen_outputs:
+                return f"Error: duplicate plan output: {output_file}"
+            unknown_uses = [name for name in step.get("uses", []) if name not in seen_outputs]
+            if unknown_uses:
+                return (
+                    f"Error: plan step {i + 1} references unknown or future outputs: "
+                    + ", ".join(unknown_uses)
+                )
+            out_path = (tmp_dir / output_file).resolve()
+            try:
+                out_path.relative_to(tmp_dir.resolve())
+            except ValueError:
+                return f"Error: plan output escapes session directory: {output_file}"
+            step["description"] = desc
+            step["output"] = output_file
+            step["_out_path"] = out_path
+            normalized_steps.append(step)
+            seen_outputs.add(output_file)
+
+        # Materialize the validated plan before execution so it survives an
+        # interruption and can be inspected or resumed by another session.
+        plan_tasks = []
+        output_to_task = {}
+        for i, step in enumerate(normalized_steps):
+            output_file = step["output"]
+            dependencies = [output_to_task[name] for name in step.get("uses", [])
+                            if name in output_to_task]
+            task = self.task_store.create(
+                title=step["description"],
+                status="pending",
+                dependencies=dependencies,
+                metadata={
+                    "plan_step": i + 1,
+                    "agent": step.get("agent"),
+                    "tool": step.get("tool"),
+                    "output": output_file,
+                    "uses": step.get("uses", []),
+                },
+            )
+            plan_tasks.append(task)
+            output_to_task[output_file] = task["id"]
+
+        for i, step in enumerate(normalized_steps):
+            desc = step["description"]
             agent_name = step.get("agent")
             tool_name = step.get("tool")
             args = step.get("args", {})
-            output_file = step.get("output")
+            output_file = step["output"]
+            out_path = step["_out_path"]
             uses = step.get("uses", [])
+            task_id = plan_tasks[i]["id"]
 
             # Skip if any dependency failed
             missing_deps = [u for u in uses if u in failed_outputs]
             if missing_deps:
                 print(f"\n  {C.warning}[{i + 1}/{total}]{C.reset} {desc}")
                 print(f"  {C.tool_error}Skipped — depends on failed: {', '.join(missing_deps)}{C.reset}")
-                if output_file:
-                    failed_outputs.add(output_file)
-                    results[output_file] = {"size": 0, "ok": False, "reason": "skipped"}
+                failed_outputs.add(output_file)
+                results[output_file] = {
+                    "size": 0, "ok": False, "reason": "skipped", "task_id": task_id,
+                }
+                self.task_store.update(
+                    task_id, status="skipped",
+                    error=f"depends on failed outputs: {', '.join(missing_deps)}",
+                )
                 continue
 
             print(f"\n  {C.info}[{i + 1}/{total}]{C.reset} {desc}")
+            self.task_store.update(task_id, status="in_progress")
 
-            # Inject content from previous step outputs
+            # Pass references, not full previous outputs. The next agent can use
+            # read/memory only when it actually needs the detail.
             if uses and (agent_name or tool_name):
                 context_parts = []
                 for use_file in uses:
-                    use_path = tmp_dir / use_file
-                    if use_path.exists():
-                        content = use_path.read_text(encoding="utf-8")
-                        context_parts.append(f"--- {use_file} ---\n{content}")
+                    info = results.get(use_file)
+                    if info:
+                        context_parts.append(
+                            f"- {use_file}: artifact={info.get('artifact')}, "
+                            f"memory_id={info.get('memory_id')}, task_id={info.get('task_id')}"
+                        )
                 if context_parts:
-                    extra_context = "\n\n".join(context_parts)
+                    extra_context = (
+                        "Previous step references. Use read or memory(get) only for details:\n"
+                        + "\n".join(context_parts)
+                    )
                     if agent_name:
                         current_args = args.copy()
                         for key in ("task", "question", "target", "path", "symbol"):
@@ -934,39 +988,83 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             except KeyboardInterrupt:
                 result = "Cancelled by user"
                 print(f"  {C.warning}Plan interrupted at step {i + 1}{C.reset}")
-                if output_file:
-                    failed_outputs.add(output_file)
+                failed_outputs.add(output_file)
+                self.task_store.update(task_id, status="failed", error=result)
                 break
             except Exception as e:
                 result = f"Error: {e}"
                 is_error = True
 
-            if result.startswith("Error:") or result.startswith("Agent error:"):
+            if (
+                result.startswith("Error:")
+                or result.startswith("Agent error:")
+                or "<tool_call>" in result.lower()
+                or "<function=" in result.lower()
+            ):
                 is_error = True
 
-            # Save to tmp file
-            if output_file:
-                out_path = tmp_dir / output_file
-                out_path.write_text(result, encoding="utf-8")
-                results[output_file] = {"size": len(result), "ok": not is_error}
-                if is_error:
-                    failed_outputs.add(output_file)
-                    print(f"  {C.tool_error}Failed: {result[:100]}{C.reset}")
-                else:
-                    print(f"  {C.muted}→ {output_file} ({len(result)} chars){C.reset}")
-                    completed += 1
+            # The complete result is an artifact; shared memory receives only a
+            # concise preview and a pointer to that artifact.
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(result, encoding="utf-8")
+            preview = " ".join(result.split())[:500] or "(empty result)"
+            memory_record = self.memory_store.put(
+                kind="summary",
+                summary=f"{desc}: {preview}",
+                scope=output_file,
+                evidence={
+                    "task_id": task_id,
+                    "artifact": str(out_path),
+                    "agent": agent_name,
+                    "tool": tool_name,
+                },
+                tags=["plan-step", "failed" if is_error else "completed"],
+                status="needs_review" if is_error else "proposed",
+                author=agent_name or tool_name or "plan",
+            )
+            results[output_file] = {
+                "size": len(result),
+                "ok": not is_error,
+                "task_id": task_id,
+                "artifact": str(out_path),
+                "memory_id": memory_record["id"],
+            }
+            if is_error:
+                failed_outputs.add(output_file)
+                self.task_store.update(
+                    task_id, status="failed", artifact=str(out_path),
+                    memory_id=memory_record["id"], error=result[:1000],
+                )
+                print(f"  {C.tool_error}Failed: {result[:100]}{C.reset}")
             else:
+                self.task_store.update(
+                    task_id, status="done", artifact=str(out_path),
+                    memory_id=memory_record["id"], error="",
+                )
+                print(f"  {C.muted}→ {output_file} ({len(result)} chars, {memory_record['id']}){C.reset}")
                 completed += 1
+                final_result = result
 
         # Summary
-        failed = len(failed_outputs)
         skipped = sum(1 for r in results.values() if isinstance(r, dict) and r.get("reason") == "skipped")
-        parts = [f"Plan: {completed} done, {failed} failed, {skipped} skipped (of {total})."]
+        failed = sum(
+            1 for r in results.values()
+            if isinstance(r, dict) and not r.get("ok") and r.get("reason") != "skipped"
+        )
+        state = "complete" if completed == total else "incomplete"
+        parts = [f"Plan {state}: {completed} done, {failed} failed, {skipped} skipped (of {total})."]
         parts.append(f"Temp files: {tmp_dir}")
         for fname, info in results.items():
             if isinstance(info, dict):
                 status = "OK" if info["ok"] else ("skipped" if info.get("reason") == "skipped" else "FAILED")
-                parts.append(f"  {fname}: {info['size']} chars [{status}]")
+                parts.append(
+                    f"  {fname}: {info['size']} chars [{status}], "
+                    f"task=#{info.get('task_id')}, memory={info.get('memory_id', '-')}"
+                )
+        if state == "complete" and final_result:
+            parts.append("\nFinal step result:\n" + final_result[:20000])
+        elif state != "complete":
+            parts.append("Do not claim full completion; report failed and skipped steps explicitly.")
         return "\n".join(parts)
 
     def _autosave(self):

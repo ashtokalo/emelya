@@ -2,7 +2,7 @@
 
 ## Обзор
 
-11 core tools (всегда в контексте) + 5 extension tools (загружаются через load_tools)
+14 core tools (всегда в контексте) + extension tools (загружаются через load_tools)
 + MCP tools (внешние серверы, загружаются по категориям).
 
 Extension tools определяются наличием `CATEGORY = "имя_категории"` в модуле.
@@ -16,6 +16,7 @@ MCP tools регистрируются автоматически из .emelya/m
 - `work_dir: Path` — текущий рабочий каталог
 - `sandbox: Sandbox` — валидатор путей
 - `files_read: set` — множество прочитанных файлов (для защиты Write/Edit)
+- `undo_stack: list[ChangeSet]` — хронологический стек одно- и многофайловых изменений
 - `confirm: Callable` — функция запроса подтверждения у пользователя
 - `skills_dirs: list[Path]` — упорядоченный список каталогов навыков (builtin → global → local)
 - `agents_dirs: list[Path]` — упорядоченный список каталогов агентов (builtin → global → local)
@@ -78,50 +79,9 @@ MCP tools регистрируются автоматически из .emelya/m
 
 ---
 
-## 2. Write
+## 2. Edit
 
-Создание нового файла или полная перезапись существующего.
-
-### Определение
-
-```json
-{
-  "type": "function",
-  "function": {
-    "name": "write",
-    "description": "Create a new file or overwrite an existing file. You MUST read the file first before overwriting. Use edit for partial changes.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "File path (relative to working directory)"
-        },
-        "content": {
-          "type": "string",
-          "description": "Complete file content"
-        }
-      },
-      "required": ["path", "content"]
-    }
-  }
-}
-```
-
-### Поведение
-
-- Если файл существует и НЕ был ранее прочитан через Read — ошибка:
-  `"File exists but was not read first. Use read to see current content before overwriting."`
-- Если файл новый — создаёт, включая промежуточные каталоги (mkdir -p)
-- Запрос подтверждения у пользователя если файл существует
-- Путь проходит через Sandbox-валидацию
-- Возвращает: `"Written {n} lines to {path}"`
-
----
-
-## 3. Edit
-
-Поиск и замена фрагмента текста в файле. Основной инструмент для редактирования.
+Атомарный набор точных изменений одного или нескольких файлов.
 
 ### Определение
 
@@ -130,28 +90,13 @@ MCP tools регистрируются автоматически из .emelya/m
   "type": "function",
   "function": {
     "name": "edit",
-    "description": "Find and replace exact text in a file. The old_string must match exactly (including whitespace and indentation). You MUST read the file first.",
+    "description": "Atomically apply one or more exact text changes. Existing files MUST be read first.",
     "parameters": {
       "type": "object",
       "properties": {
-        "path": {
-          "type": "string",
-          "description": "File path (relative to working directory)"
-        },
-        "old_string": {
-          "type": "string",
-          "description": "Exact text to find (must be unique in the file)"
-        },
-        "new_string": {
-          "type": "string",
-          "description": "Replacement text"
-        },
-        "replace_all": {
-          "type": "boolean",
-          "description": "Replace all occurrences (default: false)"
-        }
+        "changes": {"type": "array", "items": {"type": "object"}}
       },
-      "required": ["path", "old_string", "new_string"]
+      "required": ["changes"]
     }
   }
 }
@@ -159,35 +104,23 @@ MCP tools регистрируются автоматически из .emelya/m
 
 ### Поведение
 
-- Файл ДОЛЖЕН быть предварительно прочитан через Read — иначе ошибка
-- `old_string` ищется как точная подстрока в содержимом файла
-- Если `replace_all: false` (default) и найдено больше одного вхождения — ошибка:
-  `"Found {n} occurrences. Provide more context to make old_string unique, or use replace_all."`
-- Если не найдено ни одного вхождения — ошибка:
-  `"old_string not found in file. Make sure it matches exactly, including whitespace."`
-- Запрос подтверждения у пользователя
-- Возвращает: `"Replaced {n} occurrence(s) in {path}"`
+- Update/write/delete требуют предварительного Read, create — нет
+- Поддерживаются ключи пути `update`, `write`, `create`, `delete`
+- Все операции проверяются до первой записи
+- Несколько update одного файла применяются последовательно
+- Один вызов создаёт один ChangeSet для `/undo`
+- Пути могут быть относительными или абсолютными внутри work directory;
+  выход за границы Sandbox запрещён
 
 ### Примеры использования моделью
 
-Удаление строки:
 ```json
-{"path": "main.py", "old_string": "    debug_print(x)\n", "new_string": ""}
-```
-
-Вставка после строки:
-```json
-{"path": "main.py", "old_string": "import os", "new_string": "import os\nimport sys"}
-```
-
-Замена фрагмента:
-```json
-{"path": "main.py", "old_string": "    if x > 0:", "new_string": "    if x >= 0:"}
+{"changes": [{"update": "main.py", "old_string": "if x > 0:", "new_string": "if x >= 0:"}]}
 ```
 
 ---
 
-## 4. Bash
+## 3. Bash
 
 Выполнение shell-команды.
 
@@ -198,7 +131,7 @@ MCP tools регистрируются автоматически из .emelya/m
   "type": "function",
   "function": {
     "name": "bash",
-    "description": "Execute a shell command. Use for: ls, git, running scripts, installing packages, and any operation not covered by other tools. Prefer read/write/edit/glob/grep for file operations.",
+    "description": "Execute a shell command. Use for: ls, git, running scripts, installing packages, and any operation not covered by other tools. Prefer read/edit/glob/grep for file operations.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -245,8 +178,13 @@ MCP tools регистрируются автоматически из .emelya/m
 ```
   bash: Показать статус git репозитория
   $ git status
-  Выполнить? (y/n):
+  Разрешить (д), запретить (н) или запретить с комментарием (к)?
 ```
+
+При обычном отказе модель получает явный tool-result о том, что команда не
+выполнялась и изменений нет. При отказе с комментарием Emelya дополнительно
+запрашивает текст пользователя и передаёт его модели в том же error-result,
+чтобы она могла выбрать другой подход.
 
 ### Переменные окружения
 
@@ -255,7 +193,7 @@ MCP tools регистрируются автоматически из .emelya/m
 
 ---
 
-## 5. Glob
+## 4. Glob
 
 Поиск файлов по паттерну имени.
 
@@ -297,7 +235,7 @@ MCP tools регистрируются автоматически из .emelya/m
 
 ---
 
-## 6. Grep
+## 5. Grep
 
 Поиск по содержимому файлов.
 
@@ -356,7 +294,7 @@ MCP tools регистрируются автоматически из .emelya/m
 
 ---
 
-## 7. Skill
+## 6. Skill
 
 Загрузка навыка — специализированных инструкций для модели.
 
@@ -394,7 +332,7 @@ MCP tools регистрируются автоматически из .emelya/m
 
 ---
 
-## 8. Agent
+## 7. Agent
 
 Запуск субагента — отдельного цикла inference для изолированной задачи.
 
@@ -467,7 +405,14 @@ def execute(self, name: str, args: dict, context: ToolContext) -> str:
 
 ### Валидация путей
 
-Все файловые tools (read, write, edit, glob, grep) валидируют пути через Sandbox:
+Все файловые tools (read, edit, glob, grep) валидируют пути через Sandbox:
+
+- пути внутри work directory и заранее разрешённых областей доступны сразу;
+- для внешнего пути пользователь выбирает: разрешить один tool call,
+  разрешить на всю текущую сессию или запретить;
+- одноразовый доступ действует до завершения текущего tool call;
+- разрешение директории распространяется на её содержимое;
+- разрешения сессии не сохраняются после выхода из Emelya.
 
 ```python
 class Sandbox:
@@ -511,7 +456,7 @@ extension tools лежат в `src/emelya/tools/` и определяются к
 
 ## Хуки
 
-Все вызовы bash, write, edit, а также вызовы любых tools оборачиваются хуками.
+Все вызовы bash, edit, а также вызовы любых tools оборачиваются хуками.
 Хуки могут блокировать выполнение, подменять команды или фильтровать вывод.
 
 Подробнее — см. `docs/hooks.md`.

@@ -1,34 +1,36 @@
-"""Task tools — progress tracking for multi-step work."""
+"""Persistent task progress tool for multi-step work."""
 
 import sys
+
 
 DEFINITION = {
     "type": "function",
     "function": {
         "name": "task",
-        "description": "Track progress: create/update/complete tasks shown to user",
+        "description": "Track persistent progress for multi-step work",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "create, update, complete, or list",
+                    "enum": ["create", "update", "complete", "fail", "list"],
+                    "description": "Operation to perform",
                 },
-                "title": {
+                "title": {"type": "string", "description": "Task title"},
+                "id": {"type": "integer", "description": "Task ID"},
+                "status": {
                     "type": "string",
-                    "description": "Task title (for create/update)",
+                    "enum": ["pending", "in_progress", "done", "failed", "skipped"],
                 },
-                "id": {
-                    "type": "integer",
-                    "description": "Task ID (for update/complete)",
-                },
+                "note": {"type": "string", "description": "Failure or progress note"},
             },
             "required": ["action"],
         },
     },
 }
 
-# In-memory task list — reset per session
+
+# Compatibility fallback for isolated tests/contexts without a FileTaskStore.
 _tasks = []
 
 
@@ -36,8 +38,13 @@ def reset():
     _tasks.clear()
 
 
-def get_tasks():
-    return list(_tasks)
+def get_tasks(ctx=None):
+    store = getattr(ctx, "task_store", None) if ctx else None
+    return store.list() if store else list(_tasks)
+
+
+def _legacy_find(task_id):
+    return next((task for task in _tasks if task["id"] == task_id), None)
 
 
 def execute(args: dict, ctx) -> str:
@@ -50,62 +57,71 @@ def execute(args: dict, ctx) -> str:
     action = args.get("action", "")
     title = args.get("title", "")
     task_id = args.get("id")
+    store = getattr(ctx, "task_store", None)
 
-    if action == "create":
-        if not title:
-            return "Error: title is required"
-        _tasks.append({"id": len(_tasks) + 1, "title": title, "status": "in_progress"})
-        task = _tasks[-1]
-        _print_tasks(C)
-        return f"Task #{task['id']} created: {title}"
+    try:
+        if action == "create":
+            if store:
+                task = store.create(title, status=args.get("status", "in_progress"))
+            else:
+                if not title:
+                    return "Error: title is required"
+                task = {"id": len(_tasks) + 1, "title": title, "status": "in_progress"}
+                _tasks.append(task)
+            _print_tasks(get_tasks(ctx), C)
+            return f"Task #{task['id']} created: {title}"
 
-    if action == "update":
-        if task_id is None:
-            return "Error: id is required"
-        task = _find(task_id)
-        if not task:
-            return f"Error: task #{task_id} not found"
-        if title:
-            task["title"] = title
-        _print_tasks(C)
-        return f"Task #{task_id} updated"
+        if action in ("update", "complete", "fail"):
+            if task_id is None:
+                return "Error: id is required"
+            status = args.get("status")
+            if action == "complete":
+                status = "done"
+            elif action == "fail":
+                status = "failed"
+            if store:
+                changes = {}
+                if title:
+                    changes["title"] = title
+                if status:
+                    changes["status"] = status
+                if args.get("note"):
+                    changes["error"] = args["note"]
+                task = store.update(task_id, **changes)
+            else:
+                task = _legacy_find(task_id)
+                if not task:
+                    return f"Error: task #{task_id} not found"
+                if title:
+                    task["title"] = title
+                if status:
+                    task["status"] = status
+            _print_tasks(get_tasks(ctx), C)
+            return f"Task #{task_id} {task['status']}"
 
-    if action == "complete":
-        if task_id is None:
-            return "Error: id is required"
-        task = _find(task_id)
-        if not task:
-            return f"Error: task #{task_id} not found"
-        task["status"] = "done"
-        _print_tasks(C)
-        return f"Task #{task_id} completed"
+        if action == "list":
+            tasks = get_tasks(ctx)
+            if not tasks:
+                return "No tasks"
+            return "\n".join(
+                f"  {_mark(task['status'])} #{task['id']} [{task['status']}] {task['title']}"
+                for task in tasks
+            )
 
-    if action == "list":
-        if not _tasks:
-            return "No tasks"
-        lines = []
-        for t in _tasks:
-            mark = "✓" if t["status"] == "done" else "→"
-            lines.append(f"  {mark} #{t['id']} {t['title']}")
-        return "\n".join(lines)
-
-    return f"Error: unknown action '{action}'. Use: create, update, complete, list"
+        return "Error: unknown action. Use: create, update, complete, fail, list"
+    except (ValueError, KeyError, OSError, TypeError) as exc:
+        return f"Error: {exc}"
 
 
-def _find(task_id):
-    for t in _tasks:
-        if t["id"] == task_id:
-            return t
-    return None
+def _mark(status):
+    return {"done": "✓", "failed": "✗", "skipped": "-"}.get(status, "→")
 
 
-def _print_tasks(C):
-    """Print compact task status line."""
-    if not _tasks:
+def _print_tasks(tasks, C):
+    if not tasks:
         return
-    done = sum(1 for t in _tasks if t["status"] == "done")
-    total = len(_tasks)
-    current = next((t for t in _tasks if t["status"] == "in_progress"), None)
+    done = sum(1 for task in tasks if task["status"] == "done")
+    current = next((task for task in tasks if task["status"] == "in_progress"), None)
     label = current["title"] if current else "..."
-    sys.stdout.write(f"\r\033[K  {C.muted}[{done}/{total}] {label}{C.reset}")
+    sys.stdout.write(f"\r\033[K  {C.muted}[{done}/{len(tasks)}] {label}{C.reset}")
     sys.stdout.flush()

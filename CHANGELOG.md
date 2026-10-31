@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] - 2026-10-31
+
+### Added
+- **Session-scoped shared memory** — atomic file-based records for findings, decisions, summaries, evidence, review state, and links. Main and nested agents share the same store without a database or third-party dependencies.
+- **Persistent task store** — plan and task state survives session operations; every planned step records its dependencies, status, artifact, memory reference, and error details.
+- **Plan artifacts and verification agents** — complete step output is stored under the session `tmp/` directory, while dependent agents receive compact references. Added dedicated finding-verification and report-compilation agents.
+- **Atomic multi-file editing** — the `edit` tool now supports grouped create/update/write/delete operations with staging, conflict checks, rollback, permission preservation, and one undo entry.
+- **Interactive external-path grants** — sandbox access outside the working directory can be allowed once, for the session, or denied with a model-facing comment.
+
+### Changed
+- **Universal complex-task orchestration** — the planner now decomposes broad work into bounded deliverables with explicit dependencies and completion criteria instead of enforcing an audit-specific pipeline.
+- **Agent result contract** — final interaction budget is reserved for synthesis; empty responses, progress-only text, leaked textual tool calls, timeouts, and failed dependencies can no longer be reported as completed work.
+- **Bounded sub-agent context** — large tool results are compacted before being retained in agent history; full plan results remain available as artifacts.
+- **User-language inheritance** — nested agents inherit the original user's language through their shared execution context. Final answers, plan/task titles, and model-authored `description`/`title`/`summary` tool fields are required in that language while commands, paths, and identifiers remain unchanged.
+- **Unified file modification interface** — removed the standalone `write` tool and folded full-file writes into atomic `edit` operations; updated prompts, manuals, hooks, previews, and tests.
+- **Session operations** — rename and branch now preserve shared memory and persistent tasks.
+
+### Fixed
+- Failed or incomplete agent output is now persisted as `failed`, and dependent plan steps are marked `skipped` instead of producing a false successful report.
+- Malformed plans are fully validated before persistent tasks are created, preventing abandoned partial plans.
+- Confirmation denials explicitly tell the model that no command or file change occurred and may include the user's correction.
+- Russian operation descriptions now propagate through nested agents even when a parent supplies English-only agent arguments.
+
+## [0.5.2.1] - 2026-07-17
+
+### Added
+- **Per-model proxy** — each model in `models.json` accepts an optional `"proxy"` field. Supported schemes: `http://`, `socks5://`, `socks5h://` (remote DNS). Credentials are optional: `socks5://user:pass@host:port`.
+- **Named proxies** — top-level `"proxies"` object in `models.json` lets multiple models share one proxy config by name instead of repeating the URL.
+- **Environment variable proxy fallback** — when a model has no explicit `"proxy"`, emelya checks `HTTPS_PROXY`, `ALL_PROXY`, `HTTP_PROXY` (and lowercase variants) in that order. `ALL_PROXY=socks5://...` is handled correctly, unlike stdlib urllib which ignores it.
+- **Built-in SOCKS5 implementation** — no external dependencies. Full RFC 1928 + RFC 1929 (username/password auth). DNS resolution always happens on the proxy side (equivalent to `socks5h://`).
+
+### Changed
+- **Model switch error handling** — `/model <name>` now catches proxy or connection errors and shows a readable message instead of a traceback; the active model is not changed on failure.
+- **Connection diagnostics** — "Server unavailable" warning now includes the actual error reason (e.g. `SOCKS5: authentication failed`, `[Errno 111] Connection refused`).
+- **Model display name** — switching to a cloud model with a specific model ID (e.g. `gpt-4o`) no longer replaces the display name with the first entry from `/v1/models`; the configured model name is shown instead.
+
 ## [0.5.2] - 2026-07-13
 
 ### Added
@@ -34,19 +70,6 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - **Exit synonyms** — `exit`, `quit`, `выход`, `пока` (and typo variants) are accepted as `/exit` without the slash, case- and whitespace-insensitive.
 - **No startup noise** — removed "model unavailable" warning and MCP tool-count message on startup.
-
-## [0.5.2.1] - 2026-07-17
-
-### Added
-- **Per-model proxy** — each model in `models.json` accepts an optional `"proxy"` field. Supported schemes: `http://`, `socks5://`, `socks5h://` (remote DNS). Credentials are optional: `socks5://user:pass@host:port`.
-- **Named proxies** — top-level `"proxies"` object in `models.json` lets multiple models share one proxy config by name instead of repeating the URL.
-- **Environment variable proxy fallback** — when a model has no explicit `"proxy"`, emelya checks `HTTPS_PROXY`, `ALL_PROXY`, `HTTP_PROXY` (and lowercase variants) in that order. `ALL_PROXY=socks5://...` is handled correctly, unlike stdlib urllib which ignores it.
-- **Built-in SOCKS5 implementation** — no external dependencies. Full RFC 1928 + RFC 1929 (username/password auth). DNS resolution always happens on the proxy side (equivalent to `socks5h://`).
-
-### Changed
-- **Model switch error handling** — `/model <name>` now catches proxy or connection errors and shows a readable message instead of a traceback; the active model is not changed on failure.
-- **Connection diagnostics** — "Server unavailable" warning now includes the actual error reason (e.g. `SOCKS5: authentication failed`, `[Errno 111] Connection refused`).
-- **Model display name** — switching to a cloud model with a specific model ID (e.g. `gpt-4o`) no longer replaces the display name with the first entry from `/v1/models`; the configured model name is shown instead.
 
 ## [0.5.1] - 2026-06-22
 

@@ -136,7 +136,7 @@ class TestHookRunnerRun(unittest.TestCase):
                 "PostBash": [{
                     "type": "command",
                     "command": "exit 2",  # would block
-                    "tools": ["write"],   # but only for "write" tool
+                    "tools": ["edit"],   # but only for the edit tool
                 }]
             }
             (emelya_dir / "hooks.json").write_text(json.dumps(hooks_data))
@@ -597,10 +597,10 @@ class TestBashHookIntegration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# write.py integration
+# edit create integration
 # ---------------------------------------------------------------------------
 
-class TestWriteHookIntegration(unittest.TestCase):
+class TestEditCreateHookIntegration(unittest.TestCase):
 
     def _ctx(self, tmpdir, hook_runner=None):
         sandbox = Sandbox(Path(tmpdir))
@@ -611,38 +611,39 @@ class TestWriteHookIntegration(unittest.TestCase):
         )
         return ctx
 
-    def test_prewrite_block_prevents_write(self):
-        from emelya.tools.write import execute
+    def test_prewrite_block_prevents_create(self):
+        from emelya.tools.edit import execute
         with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "output.txt"
             hr = HookResult(block=True, reason="no writes allowed")
             mock_runner = MagicMock()
             mock_runner.run.return_value = hr
             ctx = self._ctx(tmpdir, hook_runner=mock_runner)
-            result = execute({"path": "output.txt", "content": "hello"}, ctx)
+            result = execute({"changes": [{"create": "output.txt", "content": "hello"}]}, ctx)
             self.assertIn("Blocked", result)
             self.assertFalse(target.exists())
 
     def test_prewrite_hook_called_with_path_and_content(self):
-        from emelya.tools.write import execute
+        from emelya.tools.edit import execute
         with tempfile.TemporaryDirectory() as tmpdir:
             hr = HookResult()  # don't block
             mock_runner = MagicMock()
             mock_runner.run.return_value = hr
             ctx = self._ctx(tmpdir, hook_runner=mock_runner)
-            execute({"path": "foo.txt", "content": "bar"}, ctx)
+            execute({"changes": [{"create": "foo.txt", "content": "bar"}]}, ctx)
             mock_runner.run.assert_called_once()
             call_event, call_data = mock_runner.run.call_args[0]
             self.assertEqual(call_event, "PreWrite")
             self.assertIn("foo.txt", call_data.get("path", ""))
-            self.assertEqual(call_data.get("content"), "bar")
+            self.assertEqual(call_data.get("new_content"), "bar")
+            self.assertEqual(call_data.get("operation"), "create")
 
-    def test_no_hook_runner_writes_normally(self):
-        from emelya.tools.write import execute
+    def test_no_hook_runner_creates_normally(self):
+        from emelya.tools.edit import execute
         with tempfile.TemporaryDirectory() as tmpdir:
             ctx = self._ctx(tmpdir, hook_runner=None)
-            result = execute({"path": "out.txt", "content": "hello"}, ctx)
-            self.assertIn("Written", result)
+            result = execute({"changes": [{"create": "out.txt", "content": "hello"}]}, ctx)
+            self.assertIn("Applied edits", result)
             self.assertEqual((Path(tmpdir) / "out.txt").read_text(), "hello")
 
 
@@ -672,9 +673,8 @@ class TestEditHookIntegration(unittest.TestCase):
             ctx = self._ctx(tmpdir, hook_runner=mock_runner)
             ctx.files_read.add(str(target))
             result = execute({
-                "path": "file.txt",
-                "old_string": "old content",
-                "new_string": "new content",
+                "changes": [{"update": "file.txt", "old_string": "old content",
+                             "new_string": "new content"}],
             }, ctx)
             self.assertIn("Blocked", result)
             # File must not be modified
@@ -688,11 +688,10 @@ class TestEditHookIntegration(unittest.TestCase):
             ctx = self._ctx(tmpdir, hook_runner=None)
             ctx.files_read.add(str(target))
             result = execute({
-                "path": "file.txt",
-                "old_string": "hello",
-                "new_string": "goodbye",
+                "changes": [{"update": "file.txt", "old_string": "hello",
+                             "new_string": "goodbye"}],
             }, ctx)
-            self.assertIn("Replaced", result)
+            self.assertIn("Applied edits", result)
             self.assertIn("goodbye", target.read_text())
 
 

@@ -16,5 +16,5 @@ read(path="src/main.py", offset=50, limit=100)
 ## Notes
 
 - Binary files are rejected; use `hex_read` for binary content.
-- Adds the file to read tracking, which is required before using `edit` or `write` on it.
+- Adds the file to read tracking, which is required before using `edit` to update, write, or delete it.
 - When the file is longer than the returned range, output ends with: `[Lines X-Y of Z, N more — use offset=Y+1]`

@@ -19,4 +19,4 @@ bash(command="ls -la /tmp")
 - Requires user confirmation before execution.
 - Output is truncated at 10000 characters.
 - Use for git, running scripts, and system commands.
-- Prefer `read`, `write`, `edit`, `glob_tool`, and `grep` for file operations instead of shell equivalents.
+- Prefer `read`, `edit`, `glob_tool`, and `grep` for file operations instead of shell equivalents.

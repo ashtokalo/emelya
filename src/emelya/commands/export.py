@@ -25,24 +25,13 @@ def _cmd_export(self, path: str = ""):
             name = entry["name"]
             args = entry.get("args", {})
             if name == "edit":
-                old = args.get("old_string", "")
-                new = args.get("new_string", "")
-                lines.append(f"**● {t('tool_edit', path=args.get('path', ''))}**\n")
-                if old or new:
-                    lines.append("```diff")
-                    for l in old.splitlines():
-                        lines.append(f"- {l}")
-                    for l in new.splitlines():
-                        lines.append(f"+ {l}")
-                    lines.append("```\n")
-            elif name == "write":
-                content = args.get("content", "")
-                n = content.count("\n") + 1 if content else 0
-                lines.append(f"**● {t('tool_write', path=args.get('path', ''))}** ({n} lines)\n")
-                preview = "\n".join(content.splitlines()[:20])
-                if content.count("\n") > 20:
-                    preview += f"\n... ({content.count(chr(10)) + 1} lines total)"
-                lines.append(f"```\n{preview}\n```\n")
+                changes = args.get("changes", [])
+                lines.append(f"**● {t('tool_edit', path=f'{len(changes)} change(s)')}**\n")
+                for change in changes:
+                    operation = next((op for op in ("update", "write", "create", "delete")
+                                      if op in change), "?")
+                    lines.append(f"- `{operation}` `{change.get(operation, '')}`")
+                lines.append("")
             elif name == "bash":
                 cmd = args.get("command", "")
                 desc = args.get("description", cmd)

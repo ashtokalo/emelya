@@ -1,6 +1,7 @@
 """Agent tool — run sub-agents as isolated inference cycles."""
 
 import json
+import copy
 from pathlib import Path
 
 
@@ -132,11 +133,17 @@ def execute(args: dict, ctx) -> str:
         except KeyError as e:
             return f"Error: missing argument {e} for agent '{name}'"
 
+    prompt += _execution_contract()
+
     allowed_tools = meta.get("tools", ["read", "glob", "grep"])
+    allowed_tools = list(allowed_tools)
+    # Every sub-agent can consult and contribute to the same session memory.
+    if ctx.memory_store is not None and "memory" not in allowed_tools:
+        allowed_tools.append("memory")
     max_steps = meta.get("max_steps", 5)
 
     # Classify agent: light (read-only) vs full
-    WRITE_TOOLS = {"write", "edit", "bash", "agent", "hex_write"}
+    WRITE_TOOLS = {"edit", "bash", "agent", "hex_write"}
     agent_operation = "agent_light" if not (set(allowed_tools) & WRITE_TOOLS) else "agent"
     if name == "planner":
         agent_operation = "planner"
@@ -165,6 +172,9 @@ def execute(args: dict, ctx) -> str:
         depth=next_depth,
         agent_name=name,
         operation=agent_operation,
+        user_language=(
+            ctx.user_language or _detect_task_language(agent_args)
+        ),
     )
 
     # If planner — return plan as JSON instead of text
@@ -177,7 +187,7 @@ def execute(args: dict, ctx) -> str:
 
 def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
                     ctx, depth: int = 1, agent_name: str = "",
-                    operation: str = "agent") -> str:
+                    operation: str = "agent", user_language: str = "") -> str:
     """Run isolated agent loop with progress output and routing support."""
     import sys
     import time
@@ -191,8 +201,14 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
 
     indent = "  " * depth
 
-    messages = [{"role": "user", "content": prompt}]
-    tools = ctx.tool_registry.get_tools(allowed_tools)
+    user_language = user_language or _detect_task_language(prompt)
+    messages = [
+        {"role": "system", "content": _language_system_message(user_language)},
+        {"role": "user", "content": prompt},
+    ]
+    tools = _language_bound_tools(
+        ctx.tool_registry.get_tools(allowed_tools), user_language
+    )
 
     # Resolve LLM client via routing
     llm_client = ctx.llm_client
@@ -208,6 +224,7 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         sandbox=ctx.sandbox,
         files_read=set(),
         confirm=ctx.confirm,
+        get_cancellation_result=ctx.get_cancellation_result,
         config=ctx.config,
         agent_depth=depth,
         max_agent_depth=ctx.max_agent_depth,
@@ -217,6 +234,9 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         session_log=ctx.session_log,
         usage_tracker=ctx.usage_tracker,
         get_routed_client=ctx.get_routed_client,
+        memory_store=ctx.memory_store,
+        task_store=ctx.task_store,
+        user_language=user_language,
     )
 
     if routed_model and routed_model != "local":
@@ -233,9 +253,22 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         sys.stdout.write(f"\r\033[K{indent}{_C.muted}  [{agent_name}] step {step + 1}/{max_steps}...{_C.reset}")
         sys.stdout.flush()
 
-        # Last step — force text-only (no tools) so model can't ignore nudge
+        # Reserve two attempts for synthesis. The penultimate attempt normally
+        # produces the result; the last one can repair an empty/progress-only
+        # response without spending another tool call.
         remaining = max_steps - step - 1
-        step_tools = None if remaining == 0 else (tools if tools else None)
+        reserved_summaries = 2 if max_steps >= 3 else 1
+        summary_phase = remaining < reserved_summaries
+        step_tools = None if summary_phase else (tools if tools else None)
+        if remaining == reserved_summaries - 1:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Stop investigation now. Produce the requested deliverable from "
+                    "the evidence already collected. Do not request or describe another "
+                    "tool call. Use the same language as the user's task."
+                ),
+            })
 
         try:
             response = llm_client.chat(
@@ -273,8 +306,40 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
         messages.append(assistant_msg)
 
         tool_calls = response.get("tool_calls")
+        if tool_calls and step_tools is None:
+            for tc in tool_calls:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": (
+                        "Error: investigation budget is exhausted; the tool was not "
+                        "executed. Return the final deliverable now."
+                    ),
+                })
+            if remaining > 0:
+                continue
+            return _format_agent_error(
+                agent_name, step, max_steps, action_log,
+                "agent requested tools after the investigation budget was exhausted",
+            )
         if not tool_calls:
-            return response.get("content") or "Agent returned no result"
+            content = response.get("content") or ""
+            invalid_reason = _invalid_final_result(content)
+            if invalid_reason and remaining > 0:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"The previous response is not a deliverable ({invalid_reason}). "
+                        "Return the final result now, using the user's language."
+                    ),
+                })
+                continue
+            if invalid_reason:
+                return _format_agent_error(
+                    agent_name, step, max_steps, action_log,
+                    invalid_reason,
+                )
+            return content
 
         for tc in tool_calls:
             tc_name = tc["name"]
@@ -339,7 +404,7 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
-                "content": result,
+                "content": _compact_tool_result(result),
             })
 
     # Step limit — force summary
@@ -372,7 +437,18 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
             )
         sys.stdout.write(f"\r\033[K")
         sys.stdout.flush()
-        return response.get("content") or "Agent returned no result"
+        content = response.get("content") or ""
+        if _looks_like_unexecuted_tool_call(content):
+            return _format_agent_error(
+                agent_name, max_steps, max_steps, action_log,
+                "model emitted a tool call as plain text during final summary",
+            )
+        if not content.strip():
+            return _format_agent_error(
+                agent_name, max_steps, max_steps, action_log,
+                "agent returned no final result",
+            )
+        return content
     except Exception as e:
         sys.stdout.write(f"\r\033[K")
         sys.stdout.flush()
@@ -382,8 +458,119 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
 
 def _format_agent_error(agent_name, step, max_steps, action_log, error_msg):
     """Format informative error with action history."""
-    parts = [f"Agent '{agent_name}' failed at step {step + 1}/{max_steps}."]
+    parts = [f"Error: agent '{agent_name}' failed at step {step + 1}/{max_steps}."]
     if action_log:
         parts.append(f"Completed actions: {'; '.join(action_log)}.")
     parts.append(f"Error: {error_msg}")
     return " ".join(parts)
+
+
+def _looks_like_unexecuted_tool_call(content: str) -> bool:
+    """Detect provider-specific tool markup returned as ordinary assistant text."""
+    text = content.lower()
+    return (
+        "<tool_call>" in text
+        or "<function=" in text
+        or ("<function_calls>" in text and "<invoke" in text)
+    )
+
+
+def _looks_like_progress_only(content: str) -> bool:
+    """Reject short promises of future work presented as a completed result."""
+    text = " ".join(content.strip().lower().split())
+    if len(text) >= 240:
+        return False
+    prefixes = (
+        "let me ", "i'll ", "i will ", "now let me ", "next i ",
+        "давайте ", "сейчас я ", "теперь я ", "проверю ", "посмотрю ",
+    )
+    return text.startswith(prefixes)
+
+
+def _invalid_final_result(content: str) -> str:
+    """Return a model-facing reason when text is not a usable deliverable."""
+    if not content.strip():
+        return "agent returned no result"
+    if _looks_like_unexecuted_tool_call(content):
+        return "model emitted a tool call as plain text; it was not executed"
+    if _looks_like_progress_only(content):
+        return "response only announces future work"
+    return ""
+
+
+def _execution_contract() -> str:
+    """Universal contract shared by all specialized agents."""
+    return (
+        "\n\nExecution contract:\n"
+        "- Keep the investigation bounded to the requested deliverable.\n"
+        "- Use the same language as the user's task for the final response and all "
+        "user-visible tool descriptions. Technical identifiers may remain unchanged.\n"
+        "- Finish with an actual result, not a promise to continue or a textual tool call.\n"
+        "- State whether the result is complete, partial, or blocked; include concrete "
+        "evidence and name any remaining work.\n"
+        "- Reserve enough interaction budget to synthesize the result.\n"
+    )
+
+
+def _detect_task_language(value) -> str:
+    """Detect Russian from nested task arguments; default to English."""
+    if isinstance(value, dict):
+        text = " ".join(str(item) for item in value.values())
+    elif isinstance(value, (list, tuple)):
+        text = " ".join(str(item) for item in value)
+    else:
+        text = str(value or "")
+    return "ru" if any("\u0400" <= char <= "\u04ff" for char in text) else "en"
+
+
+def _language_system_message(language: str) -> str:
+    """Return a high-priority language contract for an isolated sub-agent."""
+    if language == "ru":
+        return (
+            "Язык пользователя — русский. Пиши по-русски все видимые пользователю "
+            "сообщения: итог, промежуточные пояснения, названия шагов, а также поля "
+            "description/title/summary в вызовах инструментов. Команды, код, пути, "
+            "имена файлов и идентификаторы не переводи. Это системное требование."
+        )
+    return (
+        "The user's language is English. Write all user-visible messages and tool "
+        "description/title/summary fields in English. Keep commands, code, paths, "
+        "file names, and identifiers unchanged. This is a system requirement."
+    )
+
+
+def _language_bound_tools(tools: list, language: str) -> list:
+    """Place the language requirement next to model-authored display fields."""
+    bound = copy.deepcopy(tools)
+    instruction = (
+        "Значение должно быть написано по-русски."
+        if language == "ru"
+        else "Write this value in English."
+    )
+    for tool in bound:
+        properties = (
+            tool.get("function", {}).get("parameters", {}).get("properties", {})
+        )
+        for field_name in ("description", "title", "summary"):
+            field = properties.get(field_name)
+            if isinstance(field, dict):
+                existing = field.get("description", "")
+                field["description"] = (existing + " " + instruction).strip()
+    return bound
+
+
+
+
+def _compact_tool_result(result: str, limit: int = 8000) -> str:
+    """Bound sub-agent history growth while preserving both ends of output."""
+    if len(result) <= limit:
+        return result
+    head = limit * 3 // 4
+    tail = limit - head
+    omitted = len(result) - limit
+    return (
+        result[:head]
+        + f"\n\n[... {omitted} characters omitted from agent context; "
+          "use a narrower query or paged read ...]\n\n"
+        + result[-tail:]
+    )

@@ -9,7 +9,7 @@ DEFINITION = {
         "description": (
             "Execute a shell command. Use for: ls, git, running scripts, "
             "and any operation not covered by other tools. "
-            "Prefer read/write/edit/glob/grep for file operations."
+            "Prefer read/edit/glob/grep for file operations."
         ),
         "parameters": {
             "type": "object",
@@ -191,7 +191,7 @@ def execute(args: dict, ctx) -> str:
 
     if _needs_confirm(command, confirm_mode) and ctx.confirm:
         if not ctx.confirm(f"bash: {description}", f"$ {command}"):
-            return "Cancelled by user"
+            return ctx.cancellation_result()
 
     try:
         result = subprocess.run(

@@ -1,5 +1,6 @@
 """REPL /branch command."""
 
+import shutil
 from datetime import datetime
 
 from emelya.i18n import t
@@ -11,11 +12,17 @@ def _cmd_branch(self, name: str = ""):
 
     self._autosave()
     old_name = self.session_name
+    old_session_dir = self.sessions_dir / old_name
 
     self.session_name = branch_name
     session_dir = self._session_dir()
 
     self.context.save(session_dir / "context.json")
+    for dirname in ("memory", "tasks"):
+        old_state = old_session_dir / dirname
+        new_state = session_dir / dirname
+        if old_state.is_dir() and old_state != new_state:
+            shutil.copytree(old_state, new_state, dirs_exist_ok=True)
 
     self.log.event(f"Branched to: {branch_name}")
     self.log.close()

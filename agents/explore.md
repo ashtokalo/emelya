@@ -13,4 +13,4 @@ Strategy:
 3. Use read to examine specific files
 
 Be concise. Report what you found in 3-5 sentences.
-Do NOT modify any files. Do NOT use bash, write, or edit.
+Do NOT modify any files. Do NOT use bash or edit.

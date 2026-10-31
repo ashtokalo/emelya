@@ -6,7 +6,7 @@ max_steps: 4
 Add docstrings to all functions and classes in `{path}` that don't have them.
 
 1. Use read to see the full file
-2. For each function/class without a docstring, use edit to add one
+2. Use one edit call with a `changes` array to add the required docstrings
 
 Docstring rules:
 - Use the language's standard format (Python: triple quotes, JS: JSDoc, PHP: PHPDoc)

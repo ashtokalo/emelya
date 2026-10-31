@@ -254,7 +254,7 @@ Bash выполнил → stdout: 500 строк cargo build
 {
   "type": "command",
   "command": "~/.emelya/hooks/audit.sh",
-  "tools": ["write", "edit", "bash"]
+  "tools": ["edit", "bash"]
 }
 ```
 
@@ -295,7 +295,7 @@ jq -c '{ts: now | todate, event, tool, args}' >> ~/.emelya/audit.jsonl
   "event": "PostToolUse",
   "session": "tmp20260713183042",
   "work_dir": "/home/user/myproject",
-  "tool": "write",
+  "tool": "edit",
   "args": {
     "path": "src/parser.py",
     "content": "..."
@@ -321,7 +321,7 @@ fi
 {
   "type": "command",
   "command": ".emelya/hooks/post_write.sh",
-  "tools": ["write", "edit"]
+  "tools": ["edit"]
 }
 ```
 
@@ -490,18 +490,22 @@ EOF
 
 ### `PreWrite` — перед записью или редактированием файла
 
-Срабатывает перед `write` и `edit` **до** записи на диск. Может блокировать.
+Срабатывает перед каждой итоговой файловой операцией `edit` **до**
+записи на диск. Для многофайлового edit все `PreWrite` hooks выполняются до
+изменения первого файла; блокировка любой операции отклоняет edit целиком.
 
-**Входной JSON для write:**
+**Входной JSON для create через edit:**
 
 ```json
 {
   "event": "PreWrite",
   "session": "tmp20260713183042",
   "work_dir": "/home/user/myproject",
-  "tool": "write",
+  "tool": "edit",
   "path": "/home/user/myproject/src/auth.py",
-  "content": "import os\nSECRET_KEY = os.getenv('SECRET')\n..."
+  "operation": "create",
+  "old_content": null,
+  "new_content": "import os\nSECRET_KEY = os.getenv('SECRET')\n..."
 }
 ```
 
@@ -514,16 +518,20 @@ EOF
   "work_dir": "/home/user/myproject",
   "tool": "edit",
   "path": "/home/user/myproject/.env",
-  "old_string": "DEBUG=false",
-  "new_string": "DEBUG=true"
+  "operation": "update",
+  "old_content": "DEBUG=false\n",
+  "new_content": "DEBUG=true\n"
 }
 ```
+
+Для `add` значение `old_content` равно `null`, для `delete` значение
+`new_content` равно `null`.
 
 **Пример:** блокировать запись хардкоженных секретов:
 
 ```bash
 #!/bin/bash
-CONTENT=$(python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('content','') or d.get('new_string',''))")
+CONTENT=$(python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('content','') or d.get('new_content',''))")
 if echo "$CONTENT" | grep -qiE '(password|secret|api_key)\s*=\s*["\x27][^"\x27]{6,}'; then
   echo "Обнаружен потенциальный секрет в коде. Используйте переменные окружения." >&2
   exit 2
@@ -638,7 +646,7 @@ log.open('a').write(json.dumps(data) + '\n')
 | `PostToolUse` | После инструмента | — | ✅ |
 | `PreBash` | Перед shell-командой | ✅ | — |
 | `PostBash` | После shell-команды | — | — |
-| `PreWrite` | Перед write/edit | ✅ | — |
+| `PreWrite` | Перед файловой операцией edit | ✅ | — |
 | `SessionStart` | При запуске REPL | — | — |
 | `SessionEnd` | При выходе | — | — |
 
@@ -677,7 +685,7 @@ log.open('a').write(json.dumps(data) + '\n')
       {
         "type": "command",
         "command": ".emelya/hooks/format.sh",
-        "tools": ["write", "edit"],
+        "tools": ["edit"],
         "timeout": 30
       }
     ],

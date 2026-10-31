@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emelya"
-version = "0.5.0"
+version = "0.5.3"
 description = "CLI AI agent for local and cloud LLMs with tool calling, MCP support, and zero dependencies"
 readme = "README.md"
 license = {text = "MIT"}
@@ -26,4 +26,4 @@ emelya = "emelya.__main__:main"
 "" = "src"
 
 [tool.setuptools.package-data]
-emelya = ["tools/*.md"]
+emelya = ["tools/*.md", "tools/man/*.md"]

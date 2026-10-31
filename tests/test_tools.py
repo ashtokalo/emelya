@@ -1,4 +1,4 @@
-"""Tests for tools — registry, read, write, edit, glob, grep, list_dir."""
+"""Tests for tools — registry, read, edit, glob, grep, list_dir."""
 
 import sys
 import tempfile
@@ -24,7 +24,7 @@ class TestToolRegistry(unittest.TestCase):
         r = ToolRegistry()
         r.load_builtin(Path(__file__).parent.parent / "src" / "emelya")
         self.assertIn("read", r.names)
-        self.assertIn("write", r.names)
+        self.assertNotIn("write", r.names)
         self.assertIn("edit", r.names)
         self.assertIn("bash", r.names)
         self.assertIn("glob", r.names)
@@ -59,6 +59,30 @@ class TestToolRegistry(unittest.TestCase):
         ctx = make_ctx(Path(tempfile.mkdtemp()))
         result = r.execute("nonexistent", {}, ctx)
         self.assertIn("unknown tool", result)
+
+    def test_one_time_external_access_scope_ends_after_tool(self):
+        requests = []
+        tmpdir = Path(tempfile.mkdtemp())
+
+        def request(path):
+            requests.append(path)
+            return "once" if len(requests) == 1 else "deny"
+
+        sandbox = Sandbox(tmpdir, request_access=request)
+        ctx = ToolContext(work_dir=tmpdir, sandbox=sandbox)
+        registry = ToolRegistry()
+        definition = {"type": "function", "function": {
+            "name": "outside", "parameters": {"type": "object", "properties": {}}}}
+
+        def execute_twice(args, tool_ctx):
+            tool_ctx.sandbox.validate("/etc/passwd")
+            tool_ctx.sandbox.validate("/etc/passwd")
+            return "ok"
+
+        registry.register("outside", definition, execute_twice)
+        self.assertEqual(registry.execute("outside", {}, ctx), "ok")
+        self.assertIn("Access denied", registry.execute("outside", {}, ctx))
+        self.assertEqual(len(requests), 2)
 
 
 class TestReadTool(unittest.TestCase):
@@ -98,36 +122,36 @@ class TestReadTool(unittest.TestCase):
         self.assertTrue(any("test.txt" in f for f in self.ctx.files_read))
 
 
-class TestWriteTool(unittest.TestCase):
+class TestEditWriteOperations(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp())
         self.ctx = make_ctx(self.tmpdir)
 
     def test_create_new_file(self):
-        from emelya.tools.write import execute
-        result = execute({"path": "new.txt", "content": "hello\nworld"}, self.ctx)
-        self.assertIn("Written", result)
+        from emelya.tools.edit import execute
+        result = execute({"changes": [{"create": "new.txt", "content": "hello\nworld"}]}, self.ctx)
+        self.assertIn("Applied edits", result)
         self.assertEqual((self.tmpdir / "new.txt").read_text(), "hello\nworld")
 
     def test_overwrite_requires_read(self):
-        from emelya.tools.write import execute
+        from emelya.tools.edit import execute
         (self.tmpdir / "existing.txt").write_text("old")
-        result = execute({"path": "existing.txt", "content": "new"}, self.ctx)
+        result = execute({"changes": [{"write": "existing.txt", "content": "new"}]}, self.ctx)
         self.assertIn("not read first", result)
 
     def test_overwrite_after_read(self):
-        from emelya.tools.write import execute
+        from emelya.tools.edit import execute
         from emelya.tools.read import execute as read_exec
         (self.tmpdir / "existing.txt").write_text("old")
         read_exec({"path": "existing.txt"}, self.ctx)
-        result = execute({"path": "existing.txt", "content": "new"}, self.ctx)
-        self.assertIn("Written", result)
+        result = execute({"changes": [{"write": "existing.txt", "content": "new"}]}, self.ctx)
+        self.assertIn("Applied edits", result)
 
     def test_creates_parent_dirs(self):
-        from emelya.tools.write import execute
-        result = execute({"path": "sub/dir/file.txt", "content": "deep"}, self.ctx)
-        self.assertIn("Written", result)
+        from emelya.tools.edit import execute
+        result = execute({"changes": [{"create": "sub/dir/file.txt", "content": "deep"}]}, self.ctx)
+        self.assertIn("Applied edits", result)
         self.assertTrue((self.tmpdir / "sub" / "dir" / "file.txt").exists())
 
 
@@ -143,19 +167,17 @@ class TestEditTool(unittest.TestCase):
     def test_replace(self):
         from emelya.tools.edit import execute
         result = execute({
-            "path": "code.py",
-            "old_string": "return 'hello'",
-            "new_string": "return 'world'",
+            "changes": [{"update": "code.py", "old_string": "return 'hello'",
+                         "new_string": "return 'world'"}],
         }, self.ctx)
-        self.assertIn("Replaced", result)
+        self.assertIn("Applied edits", result)
         self.assertIn("world", (self.tmpdir / "code.py").read_text())
 
     def test_not_found_string(self):
         from emelya.tools.edit import execute
         result = execute({
-            "path": "code.py",
-            "old_string": "nonexistent",
-            "new_string": "x",
+            "changes": [{"update": "code.py", "old_string": "nonexistent",
+                         "new_string": "x"}],
         }, self.ctx)
         self.assertIn("not found", result)
 
@@ -163,9 +185,7 @@ class TestEditTool(unittest.TestCase):
         from emelya.tools.edit import execute
         (self.tmpdir / "unread.py").write_text("x")
         result = execute({
-            "path": "unread.py",
-            "old_string": "x",
-            "new_string": "y",
+            "changes": [{"update": "unread.py", "old_string": "x", "new_string": "y"}],
         }, self.ctx)
         self.assertIn("not read first", result)
 
@@ -174,11 +194,10 @@ class TestEditTool(unittest.TestCase):
         (self.tmpdir / "src").mkdir(exist_ok=True)
         (self.tmpdir / "src" / "file.py").write_text("x")
         result = execute({
-            "path": "src/aigent/file.py",
-            "old_string": "x",
-            "new_string": "y",
+            "changes": [{"update": "src/aigent/file.py", "old_string": "x",
+                         "new_string": "y"}],
         }, self.ctx)
-        self.assertIn("Did you mean", result)
+        self.assertIn("file not found", result)
 
 
 class TestGlobTool(unittest.TestCase):
@@ -248,8 +267,8 @@ class TestUndoStack(unittest.TestCase):
         self.ctx = make_ctx(self.tmpdir)
 
     def test_undo_new_file(self):
-        from emelya.tools.write import execute
-        execute({"path": "new.txt", "content": "hello"}, self.ctx)
+        from emelya.tools.edit import execute
+        execute({"changes": [{"create": "new.txt", "content": "hello"}]}, self.ctx)
         self.assertTrue((self.tmpdir / "new.txt").exists())
         result = self.ctx.undo()
         self.assertIn("deleted", result)
@@ -260,7 +279,8 @@ class TestUndoStack(unittest.TestCase):
         from emelya.tools.edit import execute as edit_exec
         (self.tmpdir / "f.txt").write_text("original")
         read_exec({"path": "f.txt"}, self.ctx)
-        edit_exec({"path": "f.txt", "old_string": "original", "new_string": "changed"}, self.ctx)
+        edit_exec({"changes": [{"update": "f.txt", "old_string": "original",
+                                "new_string": "changed"}]}, self.ctx)
         self.assertIn("changed", (self.tmpdir / "f.txt").read_text())
         self.ctx.undo()
         self.assertIn("original", (self.tmpdir / "f.txt").read_text())

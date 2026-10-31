@@ -2,9 +2,11 @@
 
 import importlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, List, Optional
 
 from emelya.sandbox import Sandbox
 
@@ -19,14 +21,59 @@ def is_binary(path, check_bytes=8192):
 
 
 @dataclass
+class FileBackup:
+    """Snapshot of one path before a file-changing operation."""
+    path: str
+    content: Optional[bytes]
+    mode: Optional[int] = None
+
+
+@dataclass
+class ChangeSet:
+    """One user-visible operation, possibly spanning several files."""
+    description: str
+    files: List[FileBackup]
+
+
+def _restore_backup(backup: FileBackup):
+    """Restore one snapshot using an adjacent temporary file."""
+    path = Path(backup.path)
+    if backup.content is None:
+        if path.exists() or path.is_symlink():
+            path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".emelya-undo-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(backup.content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if backup.mode is not None:
+            os.chmod(temp_name, backup.mode)
+        os.replace(temp_name, str(path))
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+@dataclass
 class ToolContext:
     """Shared context passed to every tool execution."""
     work_dir: Path
     sandbox: Sandbox
     files_read: set = field(default_factory=set)
     confirm: Callable = None  # confirm(description, detail) -> bool
+    get_cancellation_result: Callable = None  # () -> model-facing error text
     loaded_skills: set = field(default_factory=set)
-    undo_stack: list = field(default_factory=list)  # [(path, old_content | None)]
+    undo_stack: list = field(default_factory=list)  # list[ChangeSet]
     agent_depth: int = 0       # current nesting level (0 = main agent)
     max_agent_depth: int = 3   # max nesting allowed
     # These are set by the REPL for skill/agent tools
@@ -39,33 +86,66 @@ class ToolContext:
     get_routed_client: Callable = None  # (operation) -> LLMClient or None
     config: object = None
     hook_runner: object = None  # HookRunner instance, set by REPL
+    memory_store: object = None  # FileMemoryStore shared by main/sub-agents
+    task_store: object = None  # FileTaskStore shared by main/sub-agents
+    user_language: str = ""  # inherited by sub-agents; guessed only at the root
 
-    def backup_file(self, path: Path):
-        """Save file content to undo stack before modification."""
+    def cancellation_result(self) -> str:
+        """Return an explicit model-facing result for a denied confirmation."""
+        if self.get_cancellation_result:
+            return self.get_cancellation_result()
+        return (
+            "Error: operation cancelled by user. "
+            "The command was NOT executed and no changes were made."
+        )
+
+    def snapshot_file(self, path: Path) -> FileBackup:
+        """Return a snapshot without changing undo history."""
         if path.exists():
-            try:
-                content = path.read_bytes()
-                self.undo_stack.append((str(path), content))
-            except OSError:
-                pass
-        else:
-            # File doesn't exist yet — undo means delete
-            self.undo_stack.append((str(path), None))
+            return FileBackup(str(path), path.read_bytes(), path.stat().st_mode)
+        return FileBackup(str(path), None)
+
+    def push_changeset(self, description: str, backups: list):
+        """Add one operation to undo history."""
+        self.undo_stack.append(ChangeSet(description, list(backups)))
+
+    def backup_file(self, path: Path, description: str = None):
+        """Save one file as a single-file operation."""
+        self.push_changeset(description or f"Change {path.name}", [self.snapshot_file(path)])
 
     def undo(self) -> str:
         """Undo last file modification. Returns status message."""
         if not self.undo_stack:
             return "Nothing to undo"
-        path_str, old_content = self.undo_stack.pop()
-        path = Path(path_str)
-        if old_content is None:
-            if path.exists():
-                path.unlink()
-                return f"Undo: deleted {path.name} (was newly created)"
-            return "Undo: file already gone"
-        else:
-            path.write_bytes(old_content)
-            return f"Undo: restored {path.name}"
+        entry = self.undo_stack[-1]
+        # Accept legacy tuple entries created by older callers/sessions.
+        if isinstance(entry, tuple):
+            entry = ChangeSet("Legacy change", [FileBackup(entry[0], entry[1])])
+
+        current = [self.snapshot_file(Path(backup.path)) for backup in entry.files]
+        try:
+            for backup in reversed(entry.files):
+                _restore_backup(backup)
+        except Exception as exc:
+            # Best effort: put the post-change state back and retain the undo
+            # entry so the user can retry.
+            for backup in reversed(current):
+                try:
+                    _restore_backup(backup)
+                except OSError:
+                    pass
+            return f"Error: undo failed: {exc}"
+
+        self.undo_stack.pop()
+        restored = sum(1 for backup in entry.files if backup.content is not None)
+        deleted = sum(1 for backup in entry.files if backup.content is None)
+
+        total = restored + deleted
+        if total == 1:
+            if deleted:
+                return "Undo: deleted newly created file"
+            return f"Undo: restored {Path(entry.files[0].path).name}"
+        return f"Undo: restored {restored}, deleted {deleted} ({total} files)"
 
 
 class ToolRegistry:
@@ -194,11 +274,14 @@ class ToolRegistry:
             )
 
         try:
+            ctx.sandbox.begin_access_scope()
             return all_tools[name]["execute"](args, ctx)
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
             return f"Error: {type(e).__name__}: {e}"
+        finally:
+            ctx.sandbox.end_access_scope()
 
     def load_category(self, category: str) -> str:
         """Load an extension category. Returns status message."""

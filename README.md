@@ -10,6 +10,8 @@ Designed for programming, file analysis, debugging, and general-purpose tasks.
 - **Model routing** — failover chains per operation (planner → cloud, agents → local) with `/model auto`
 - **Agent auto-classification** — read-only agents routed as `agent_light`, write agents as `agent`
 - **Tool calling** — structured function calling, not text parsing
+- **Interactive sandbox grants** — approve an external file once or for the session
+- **Confirmation feedback** — deny an operation with an optional comment for the model
 - **Work context isolation** — tool calls don't pollute the main context (critical for 8-32K models)
 - **Auto-detect context limit** — reads llama.cpp `/props` endpoint; per-model `max_tokens` (default 8192)
 - **Compact tool descriptions** — parameter descriptions stripped for small models (<32K context)
@@ -84,7 +86,7 @@ Routing assigns different models to different operations via failover chains:
 | `agent` | Write agents (edit, bash, etc.) |
 | `agent_light` | Read-only agents (explore, grep, read only) |
 
-Agents are **auto-classified** by their tools: if an agent only uses read-only tools (read, glob, grep), it's routed as `agent_light`. Agents with write tools (edit, bash, write) are routed as `agent`.
+Agents are **auto-classified** by their tools: if an agent only uses read-only tools (read, glob, grep), it's routed as `agent_light`. Agents with write tools (edit, bash) are routed as `agent`.
 
 - `/model auto` — enable routing (use chains from models.json)
 - `/model <name>` — manual override (disables routing, all operations use this model)
@@ -113,13 +115,12 @@ LiteLLM supports 100+ providers and exposes a standard OpenAI-compatible API.
 
 ## Tools
 
-### Core (always available, 15 tools)
+### Core (always available, 14 tools)
 
 | Tool | Description |
 |------|-------------|
 | `read` | Read text files with line numbers |
-| `write` | Create or overwrite files (requires read first) |
-| `edit` | Find-and-replace by exact string match (max 30 lines per edit) |
+| `edit` | Atomically apply one or more exact changes across files |
 | `bash` | Execute shell commands (read-only auto-approved) |
 | `glob` | Find files by name pattern |
 | `grep` | Search file contents with regex |
@@ -246,7 +247,7 @@ src/emelya/                   — Python package, ~9700 lines, stdlib only
 ├── input_history.py          — input history persistence
 └── tools/                    — tool registry + 21 tools
     ├── __init__.py            — ToolRegistry (core/extension, parameter validation)
-    ├── read.py, write.py, edit.py
+    ├── read.py, edit.py
     ├── bash.py, glob_tool.py, grep.py, list_dir.py
     ├── web_fetch.py, web_search.py, skill.py, agent.py, load_tools.py
     ├── task.py, plan_mode.py, man.py

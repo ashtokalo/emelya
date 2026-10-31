@@ -15,10 +15,12 @@ Add a step to the execution plan. Used inside the planner agent.
 
 plan_step(description="Explore project structure", agent="explore_dir", args={"path": "."}, output="structure.md")
 plan_step(description="Review main module", agent="review_file", args={"path": "src/repl.py"}, output="review_repl.md")
-plan_step(description="Write final report", tool="write", args={"path": "report.md"}, uses=["structure.md", "review_repl.md"])
+plan_step(description="Verify findings", agent="verify_findings", args={"task": "Verify proposed defects"}, output="verification.md", uses=["review_repl.md"])
+plan_step(description="Create final report", agent="report_compiler", args={"task": "Compile audit report"}, output="report.md", uses=["structure.md", "review_repl.md", "verification.md"])
 
 ## Notes
 
 - Steps are collected, not executed immediately. The REPL executes them after the planner finishes.
 - The last step typically compiles previous outputs into the final result.
 - Each step runs in isolation — it doesn't see other steps' contexts.
+- Dependencies are passed as artifact paths and memory IDs, not copied in full.

@@ -20,7 +20,7 @@ DEFINITION = {
                 },
                 "tool": {
                     "type": "string",
-                    "description": "Tool name if not using agent (e.g. read, write, grep)",
+                    "description": "Tool name if not using agent (e.g. read, edit, grep)",
                 },
                 "args": {
                     "type": "object",
@@ -56,6 +56,8 @@ def get_steps():
 
 
 def execute(args: dict, ctx) -> str:
+    if bool(args.get("agent")) == bool(args.get("tool")):
+        return "Error: provide exactly one of agent or tool"
     step = {
         "description": args.get("description", ""),
         "agent": args.get("agent"),

@@ -12,6 +12,7 @@ DEFINITION = {
             "properties": {
                 "action": {
                     "type": "string",
+                    "enum": ["enter", "exit"],
                     "description": "enter or exit",
                 },
                 "plan": {
@@ -44,7 +45,7 @@ def reset():
 
 
 # Tools blocked in plan mode
-BLOCKED_TOOLS = {"write", "edit", "bash"}
+BLOCKED_TOOLS = {"edit", "bash"}
 
 
 def execute(args: dict, ctx) -> str:
@@ -61,11 +62,11 @@ def execute(args: dict, ctx) -> str:
     if action == "enter":
         _in_plan_mode = True
         _plan_text = ""
-        print(f"\n  {C.info}📋 Plan mode: ON (read-only — write/edit/bash blocked){C.reset}")
+        print(f"\n  {C.info}📋 Plan mode: ON (read-only — edit/bash blocked){C.reset}")
         return (
             "Plan mode activated. You can only use read-only tools: "
             "read, glob, grep, list_dir, web_fetch, web_search, man, skill, agent. "
-            "write/edit/bash are blocked. "
+            "edit/bash are blocked. "
             "When ready, call plan_mode(action='exit', plan='your plan here')."
         )
 
