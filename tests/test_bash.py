@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from emelya.tools.bash import _strip_cd_prefix, _is_readonly
+from emelya.tools.bash import _strip_cd_prefix, _is_readonly, _validate_workdir_command
 
 
 class TestStripCdPrefix(unittest.TestCase):
@@ -30,6 +30,30 @@ class TestStripCdPrefix(unittest.TestCase):
 
     def test_strip_no_space_after_and(self):
         self.assertEqual(_strip_cd_prefix(f"cd {self.WD}&&git log", self.WD), "git log")
+
+
+class TestWorkdirValidation(unittest.TestCase):
+
+    WD = "/home/user/project"
+
+    def test_rejects_chained_cd_path_probing(self):
+        command = "cd /one 2>/dev/null; cd /two 2>/dev/null; git status"
+        result = _validate_workdir_command(command, self.WD)
+        self.assertIn("chained cd", result)
+        self.assertIn(self.WD, result)
+
+    def test_rejects_cd_outside_workdir(self):
+        self.assertIn("outside", _validate_workdir_command("cd .. && ls", self.WD))
+
+    def test_allows_cd_inside_workdir(self):
+        self.assertEqual(_validate_workdir_command("cd src && ls", self.WD), "")
+
+    def test_rejects_git_c_outside_workdir(self):
+        result = _validate_workdir_command("git -C /tmp status", self.WD)
+        self.assertIn("outside", result)
+
+    def test_allows_git_c_inside_workdir(self):
+        self.assertEqual(_validate_workdir_command("git -C src status", self.WD), "")
 
 
 class TestIsReadonly(unittest.TestCase):
@@ -147,6 +171,25 @@ class TestIsReadonly(unittest.TestCase):
     def test_pipe_readonly(self):
         self.assertTrue(_is_readonly("git log | head -20"))
         self.assertTrue(_is_readonly("ls -la | grep py"))
+        self.assertTrue(_is_readonly("cat README.md | grep install | head"))
+
+    def test_pipe_with_writing_stage(self):
+        self.assertFalse(_is_readonly("cat file | tee copy"))
+        self.assertFalse(_is_readonly("ls | xargs rm"))
+
+    def test_readonly_command_sequence(self):
+        command = 'git status --short; echo "---"; git log --oneline -10'
+        self.assertTrue(_is_readonly(command))
+        self.assertTrue(_is_readonly("test -f README.md && grep title README.md"))
+
+    def test_sequence_with_writing_command(self):
+        self.assertFalse(_is_readonly("git status; rm generated.txt"))
+        self.assertFalse(_is_readonly("grep value file || echo value > file"))
+
+    def test_shell_control_structures_stay_guarded(self):
+        self.assertFalse(_is_readonly("for f in *.txt; do cat $f; done"))
+        self.assertFalse(_is_readonly("cat file &"))
+        self.assertFalse(_is_readonly("cat file\necho done"))
 
     # --- Dangerous commands ---
 

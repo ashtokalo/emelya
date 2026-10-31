@@ -2,6 +2,7 @@
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
@@ -130,7 +131,12 @@ def execute(args: dict, ctx) -> str:
             "web_fetch only allows public URLs. Use bash with curl for internal services."
         )
 
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    # urllib requires an ASCII request target. Preserve URL delimiters and
+    # existing percent escapes while encoding Unicode path/query characters.
+    request_url = urllib.parse.quote(
+        url, safe=":/?#[]@!$&'()*+,;=%",
+    )
+    req = urllib.request.Request(request_url, headers={"User-Agent": USER_AGENT})
 
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:

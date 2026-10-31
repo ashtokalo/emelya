@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [0.5.3] - 2026-10-31
 
 ### Added
+- **Direct shell escape** — `!<command>` runs without confirmation; output is stored in session memory while conversation history keeps only the command, status, and memory reference. TUI programs retain direct terminal access.
+- **Terminal Markdown tables** — model-generated tables are rendered with Unicode borders and wrapped to the current terminal width in streaming and non-streaming modes.
+- **Session command permissions** — confirmation can allow the same command family for the rest of the session.
+- **Terminal attention bell** — emits one audible terminal bell before blocking confirmation, external-path access, plan approval, and context-budget prompts.
 - **Session-scoped shared memory** — atomic file-based records for findings, decisions, summaries, evidence, review state, and links. Main and nested agents share the same store without a database or third-party dependencies.
 - **Persistent task store** — plan and task state survives session operations; every planned step records its dependencies, status, artifact, memory reference, and error details.
 - **Plan artifacts and verification agents** — complete step output is stored under the session `tmp/` directory, while dependent agents receive compact references. Added dedicated finding-verification and report-compilation agents.
@@ -12,6 +16,8 @@ All notable changes to this project will be documented in this file.
 - **Interactive external-path grants** — sandbox access outside the working directory can be allowed once, for the session, or denied with a model-facing comment.
 
 ### Changed
+- The model now receives authoritative `work_dir`, shell cwd, and Git-root context; bash rejects guessed-path `cd` chains and navigation outside the working directory.
+- Resuming a session now immediately replays its saved user/assistant dialog in the normal conversational layout; `/history` retains its diagnostic format.
 - **Universal complex-task orchestration** — the planner now decomposes broad work into bounded deliverables with explicit dependencies and completion criteria instead of enforcing an audit-specific pipeline.
 - **Agent result contract** — final interaction budget is reserved for synthesis; empty responses, progress-only text, leaked textual tool calls, timeouts, and failed dependencies can no longer be reported as completed work.
 - **Bounded sub-agent context** — large tool results are compacted before being retained in agent history; full plan results remain available as artifacts.
@@ -20,6 +26,12 @@ All notable changes to this project will be documented in this file.
 - **Session operations** — rename and branch now preserve shared memory and persistent tasks.
 
 ### Fixed
+- Exporting a resumed session now reconstructs its user/assistant conversation from saved context instead of producing an empty Markdown file.
+- External research loops now stop after three failed or six total web calls and synthesize an answer from available evidence; unfinished user turns are saved immediately.
+- `web_fetch` percent-encodes Unicode URLs instead of failing with an ASCII codec error.
+- REPL startup no longer blocks while connecting to uncached HTTP or stdio MCP servers; MCP network access remains explicit and lazy.
+- Ctrl+C during CLI subcommands, network connection, or startup now exits quietly with status 130 instead of printing a traceback.
+- Read-only shell pipelines and simple command sequences such as `ls | grep` or `git status; git log` are auto-approved only when every command is read-only.
 - Failed or incomplete agent output is now persisted as `failed`, and dependent plan steps are marked `skipped` instead of producing a false successful report.
 - Malformed plans are fully validated before persistent tasks are created, preventing abandoned partial plans.
 - Confirmation denials explicitly tell the model that no command or file change occurred and may include the user's correction.

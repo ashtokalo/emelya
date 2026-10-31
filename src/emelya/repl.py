@@ -1,7 +1,10 @@
 """REPL — main interactive loop with agent cycle."""
 
 import json
+import html
 import platform
+import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -19,7 +22,9 @@ from emelya.log import SessionLog, UsageTracker
 from emelya.memory import FileMemoryStore
 from emelya.sandbox import Sandbox
 from emelya.task_store import FileTaskStore
+from emelya.terminal_markdown import render_terminal_markdown, TerminalMarkdownStream
 from emelya.tools import ToolContext, ToolRegistry
+from emelya.tools.bash import _command_family
 from emelya.tools.skill import scan_skills
 from emelya.tools.agent import scan_agents, _detect_task_language
 
@@ -36,6 +41,30 @@ def _first_heading(text: str) -> str:
         if line.startswith("#"):
             return line.lstrip("#").strip()
     return ""
+
+
+def _find_git_root(path: Path) -> Path | None:
+    """Find the nearest Git worktree root without invoking Git."""
+    current = path.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+_EXTERNAL_TOOLS = {"web_search", "web_fetch"}
+_MAX_EXTERNAL_CALLS = 6
+_MAX_EXTERNAL_FAILURES = 3
+_INTERACTIVE_SHELL_COMMANDS = {
+    "mc", "vim", "vi", "nvim", "nano", "emacs", "less", "more",
+    "top", "htop", "btop", "watch", "tmux", "screen", "ssh", "telnet",
+}
+
+
+def _failed_tool_result(result: str) -> bool:
+    """Return whether a tool result is unusable evidence."""
+    text = (result or "").strip().lower()
+    return text.startswith("error:") or text in {"", "(empty response)"}
 
 
 class _WaitSpinner:
@@ -132,6 +161,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
 
         # Full conversation log for export (includes tool calls, not just final text)
         self.conversation_log = []
+        self._session_command_permissions = set()
 
         # Session management
         self.session_name = datetime.now().strftime("tmp%Y%m%d%H%M%S")
@@ -205,6 +235,12 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
     # --- Setup ---
 
     def _update_dynamic_descriptions(self):
+        self.registry.update_description(
+            "bash",
+            "Execute a shell command in the configured working directory "
+            f"({self.config.work_dir}). The cwd is already set: never use cd, git -C, "
+            "or guessed-path fallback chains. Use relative paths.",
+        )
         skills = scan_skills(self.skills_dirs)
         if skills:
             skills_list = ", ".join(f"{k} ({v})" for k, v in skills.items())
@@ -256,6 +292,15 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             "timezone": now.astimezone().tzname() or "UTC",
             "os": platform.platform(),
         })
+        git_root = _find_git_root(self.config.work_dir)
+        prompt += (
+            "\n\nExecution environment (authoritative):"
+            f"\n- work_dir/cwd: {self.config.work_dir}"
+            "\n- All relative tool and shell paths resolve from work_dir."
+            "\n- bash already starts in work_dir; do not use cd, git -C, or probe guessed paths."
+        )
+        if git_root is not None:
+            prompt += f"\n- Git repository root: {git_root}"
 
         # Append project config if exists (emelya.md)
         if self.config.config_file.exists():
@@ -304,12 +349,20 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
 
     # --- Agent loop ---
 
+    @staticmethod
+    def _notify_attention():
+        """Ring the terminal bell before a blocking user decision."""
+        if getattr(sys.stdout, "isatty", lambda: False)():
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+
     def _request_external_access(self, path: Path) -> str:
         """Ask whether an out-of-sandbox path may be used."""
         # Read-only tools may execute in parallel; never overlap terminal prompts.
         with self._external_access_lock:
             print(f"\n  {C.warning}{t('external_access', path=str(path))}{C.reset}")
             try:
+                self._notify_attention()
                 answer = input(f"  {C.warning}{t('external_access_choices')}{C.reset} ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 return "deny"
@@ -324,9 +377,24 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         self._last_cancellation_comment = ""
         if self.config.confirm_mode == "no_confirm":
             return True
+        permission = ""
+        if description.startswith("bash:") and detail.startswith("$ "):
+            permission = _command_family(detail[2:])
+            if permission in getattr(self, "_session_command_permissions", set()):
+                return True
         try:
-            answer = input(f"  {C.warning}{t('confirm_choices')}{C.reset} ").strip().lower()
+            self._notify_attention()
+            if permission.startswith("exact:"):
+                prompt = "confirm_choices_session_exact"
+            else:
+                prompt = "confirm_choices_session" if permission else "confirm_choices"
+            answer = input(f"  {C.warning}{t(prompt)}{C.reset} ").strip().lower()
             if answer in ("y", "yes", "д", "да"):
+                return True
+            if permission and answer in ("a", "always", "в", "всегда"):
+                if not hasattr(self, "_session_command_permissions"):
+                    self._session_command_permissions = set()
+                self._session_command_permissions.add(permission)
                 return True
             if answer in ("c", "comment", "к", "комментарий"):
                 self._last_cancellation_comment = input(
@@ -344,6 +412,99 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         if self._last_cancellation_comment:
             return base + " User comment: " + self._last_cancellation_comment
         return base
+
+    def _run_shell_escape(self, command: str) -> int:
+        """Run an explicit user command with direct terminal access."""
+        if not command.strip():
+            print("  Usage: !<command>")
+            return 2
+        try:
+            try:
+                words = shlex.split(command)
+            except ValueError:
+                words = command.split()
+            executable = Path(words[0]).name if words else ""
+            interactive = executable in _INTERACTIVE_SHELL_COMMANDS
+            if interactive:
+                completed = subprocess.run(
+                    command, shell=True, cwd=str(self.config.work_dir),
+                )
+                stdout = stderr = ""
+            else:
+                completed = subprocess.run(
+                    command, shell=True, cwd=str(self.config.work_dir),
+                    capture_output=True, text=True, errors="replace",
+                )
+                stdout, stderr = completed.stdout or "", completed.stderr or ""
+                if stdout:
+                    print(stdout, end="" if stdout.endswith("\n") else "\n")
+                if stderr:
+                    print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
+            if completed.returncode != 0:
+                print(f"  [exit {completed.returncode}]")
+            self._record_shell_escape(
+                command, completed.returncode, stdout, stderr, interactive,
+            )
+            return completed.returncode
+        except KeyboardInterrupt:
+            print(f"\n  {t('interrupted')}")
+            self._record_shell_escape(command, 130, interactive=True)
+            return 130
+        except OSError as e:
+            print(f"  Error: {e}")
+            self._record_shell_escape(command, 1, stderr=str(e))
+            return 1
+
+    def _record_shell_escape(self, command: str, returncode: int,
+                             stdout: str = "", stderr: str = "",
+                             interactive: bool = False):
+        """Store shell output in memory and only a reference in conversation."""
+        memory_id = ""
+        store = getattr(self, "memory_store", None)
+        if store is not None:
+            if interactive:
+                output = "Interactive terminal output was not captured."
+            else:
+                output = ""
+                if stdout:
+                    output += "STDOUT:\n" + stdout
+                if stderr:
+                    output += ("\n" if output else "") + "STDERR:\n" + stderr
+                if not output:
+                    output = "(no output)"
+            details = (
+                f"Command: {command}\nExit code: {returncode}\n\n{output}"
+            )[:199000]
+            try:
+                record = store.put(
+                    summary=f"Shell command: {command[:300]}",
+                    kind="artifact",
+                    scope="shell",
+                    details=details,
+                    tags=["shell", "user-command"],
+                    status="verified",
+                    author="user",
+                )
+                memory_id = record["id"]
+            except (ValueError, OSError, TypeError, KeyError):
+                pass
+
+        hint = (
+            f" Output is stored in memory {memory_id}; use memory(action=get, id={memory_id}) if needed."
+            if memory_id else " Output was displayed directly and no memory record was created."
+        )
+        content = (
+            "<user_shell_command>\n"
+            f"<command>{html.escape(command)}</command>\n"
+            f"<result>Exit code: {returncode}.{hint}</result>\n"
+            "</user_shell_command>"
+        )
+        if hasattr(self, "context"):
+            self.context.add_user(content)
+        if hasattr(self, "conversation_log"):
+            self.conversation_log.append({"type": "user", "content": content})
+        if hasattr(self, "_autosave"):
+            self._autosave()
 
     def _short_path(self, path: str) -> str:
         """Strip work_dir prefix from path for cleaner display."""
@@ -480,15 +641,21 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         if self.config.stream and not has_routing:
             prefix_printed = False
 
-            def _on_content(text):
+            def _emit_content(text):
                 nonlocal prefix_printed
                 if not prefix_printed:
                     spinner.stop()
                     elapsed = time.monotonic() - t0
                     prefix = _make_prefix(elapsed)
-                    print(prefix, end="", flush=True)
+                    suffix = "\n" if text.startswith(("┌", "│")) else ""
+                    print(prefix + suffix, end="", flush=True)
                     prefix_printed = True
                 print(text, end="", flush=True)
+
+            renderer = TerminalMarkdownStream(_emit_content)
+
+            def _on_content(text):
+                renderer.feed(text)
 
             try:
                 response = self.llm.stream_chat(
@@ -497,6 +664,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 )
             finally:
                 spinner.stop()
+            renderer.finish()
             if prefix_printed:
                 print()
         elif has_routing:
@@ -509,7 +677,9 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             if response.get("content"):
                 elapsed = time.monotonic() - t0
                 prefix = _make_prefix(elapsed)
-                print(f"{prefix}{response['content']}")
+                content = render_terminal_markdown(response["content"])
+                separator = "\n" if content.startswith("┌") else ""
+                print(f"{prefix}{separator}{content}")
         else:
             try:
                 response = self.llm.chat(
@@ -520,7 +690,9 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             elapsed = time.monotonic() - t0
             if response.get("content"):
                 prefix = _make_prefix(elapsed)
-                print(f"{prefix}{response['content']}")
+                content = render_terminal_markdown(response["content"])
+                separator = "\n" if content.startswith("┌") else ""
+                print(f"{prefix}{separator}{content}")
 
         # Update display name from every API response
         mid = response.get("model_id")
@@ -595,6 +767,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         # Intercept plan_mode exit
         if tc["name"] == "plan_mode" and tc["args"].get("action") == "exit":
             try:
+                self._notify_attention()
                 answer = input(f"\n  {C.warning}{t('allow')}{C.reset} ").strip().lower()
                 if answer not in ("y", "yes", "д", "да"):
                     from emelya.tools.plan_mode import reset as plan_reset
@@ -712,6 +885,9 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         self.tool_ctx.user_language = _detect_task_language(user_input)
         self.context.add_user(user_input)
         self.conversation_log.append({"type": "user", "content": user_input})
+        # Persist the user's request before any network/model work so a crash or
+        # second Ctrl+C cannot erase an unfinished turn.
+        self._autosave()
 
         # First call — from main context (update usage for accurate token tracking)
         tools = self.registry.get_tools(compact=self._use_compact_tools)
@@ -719,8 +895,12 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             response = self._llm_call(self.context.get_messages(), tools)
             self.context.update_usage(response.get("usage"))
         except (LLMError, KeyboardInterrupt) as e:
-            # No response received — remove orphaned user message
-            self.context.pop_last_user()
+            # Keep the request in session history, but balance the conversation
+            # so a resumed session can accept the next user message normally.
+            marker = f"({t('interrupted')})" if isinstance(e, KeyboardInterrupt) else f"(Error: {e})"
+            self.context.add_assistant_text(marker)
+            self.conversation_log.append({"type": "assistant", "content": marker})
+            self._autosave()
             if isinstance(e, KeyboardInterrupt):
                 print(f"\n  {t('interrupted')}")
                 self.log.event("Interrupted by user")
@@ -735,6 +915,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
             text = response.get("content") or ""
             self.context.add_assistant_text(text)
             self.conversation_log.append({"type": "assistant", "content": text})
+            self._autosave()
             return
 
         # Has tool calls — switch to work context
@@ -742,11 +923,15 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         work_messages.append(response["raw"])
         final_text = response.get("content") or ""
         consecutive_errors = 0
+        external_calls = 0
+        external_failures = 0
+        force_reason = ""
         _seen_calls = {}  # (name, args_key) -> count — duplicate detection
 
         _PARALLEL_SAFE = {"read", "grep", "glob", "list_dir", "man", "web_search"}
 
         for iteration in range(self.config.max_iterations):
+            result_start = len(work_messages)
             # Check if all calls are parallel-safe read-only tools
             can_parallel = (
                 len(tool_calls) > 1
@@ -780,8 +965,23 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                     else:
                         consecutive_errors = 0
 
+            result_messages = work_messages[result_start:]
+            for tc, message in zip(tool_calls, result_messages):
+                if tc["name"] in _EXTERNAL_TOOLS:
+                    external_calls += 1
+                    if _failed_tool_result(message.get("content", "")):
+                        external_failures += 1
+
+            if external_failures >= _MAX_EXTERNAL_FAILURES:
+                force_reason = "external tools failed repeatedly"
+                break
+            if external_calls >= _MAX_EXTERNAL_CALLS:
+                force_reason = "external tool budget reached"
+                break
+
             # Break if too many consecutive errors — force answer
             if consecutive_errors >= 3:
+                force_reason = "tools failed repeatedly"
                 break
 
             # Progressive nudge — only if last message is a tool result (safe position)
@@ -822,26 +1022,20 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 break  # Final text response
 
         # Force answer if loop ended without text response
-        if not final_text:
+        if force_reason or not final_text:
             print(f"\n  ({t('max_iter')})")
             work_messages.append({
                 "role": "user",
                 "content": (
-                    "STOP. Maximum tool call iterations reached. "
+                    f"STOP. {force_reason or 'Maximum tool call iterations reached'}. "
                     "You MUST provide your final answer RIGHT NOW based on everything you have seen. "
-                    "Do NOT say you need more information."
+                    "State uncertainty briefly when evidence is incomplete. Do not call more tools."
                 ),
             })
             try:
-                response = self.llm.chat(
-                    messages=work_messages, tools=None,
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
-                )
+                response = self._llm_call(work_messages, None)
                 if response.get("content"):
                     final_text = response["content"]
-                    tokens = self.context.estimate_tokens()
-                    print(f"\n{C.agent_prefix}{t('emelya')}{C.reset} ({C.muted}{self._model_display}, {tokens} tok{C.reset}): {final_text}")
             except Exception as e:
                 print(f"\nError: {e}")
 
@@ -1085,6 +1279,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         pct = int(tokens / self.context.context_limit * 100)
         print(f"\n  {C.warning}{t('context_warning', pct=pct, tokens=tokens, limit=self.context.context_limit)}{C.reset}")
         try:
+            self._notify_attention()
             answer = input(f"  {t('compact_prompt')}: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
@@ -1159,6 +1354,12 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
                 continue
             user_input = user_input.strip()
             if not user_input:
+                continue
+
+            # Explicit shell escape — user-authorized, outside model context.
+            # Inherited stdio lets full-screen programs (mc, vim, htop) own TTY.
+            if user_input.startswith("!"):
+                self._run_shell_escape(user_input[1:].lstrip())
                 continue
 
             # Handle /commands — anything starting with / is a command, never sent to model

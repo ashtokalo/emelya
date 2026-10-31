@@ -247,6 +247,8 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
 
     action_log = []  # track what agent did for error reporting
     _seen_calls = {}  # duplicate detection
+    external_calls = 0
+    external_failures = 0
 
     for step in range(max_steps):
         t0 = time.monotonic()
@@ -382,6 +384,11 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
 
             # Execute and track
             result = ctx.tool_registry.execute(tc_name, tc_args, sub_ctx)
+            if tc_name in {"web_search", "web_fetch"}:
+                external_calls += 1
+                normalized = (result or "").strip().lower()
+                if normalized.startswith("error:") or normalized in {"", "(empty response)"}:
+                    external_failures += 1
 
             # Build action log entry
             if tc_name == "read":
@@ -406,6 +413,10 @@ def _run_agent_loop(prompt: str, allowed_tools: list, max_steps: int,
                 "tool_call_id": tc["id"],
                 "content": _compact_tool_result(result),
             })
+
+        if external_failures >= 3 or external_calls >= 6:
+            action_log.append("external circuit breaker: synthesizing available evidence")
+            break
 
     # Step limit — force summary
     sys.stdout.write(f"\r\033[K{indent}{_C.muted}  [{agent_name}] summarizing...{_C.reset}")

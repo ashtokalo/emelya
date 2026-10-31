@@ -1,6 +1,9 @@
 """Bash tool — execute shell commands with confirmation."""
 
+import shlex
 import subprocess
+import re
+from pathlib import Path
 
 DEFINITION = {
     "type": "function",
@@ -134,20 +137,121 @@ def _strip_cd_prefix(command: str, work_dir: str) -> str:
     return cmd
 
 
+def _validate_workdir_command(command: str, work_dir: str) -> str:
+    """Reject path probing and shell navigation outside the working directory."""
+    cd_targets = re.findall(
+        r"(?:^|&&|\|\||[;|])\s*cd\s+((?:\"[^\"]*\"|'[^']*'|[^\s;&|]+))",
+        command,
+    )
+    if len(cd_targets) > 1:
+        return (
+            "Error: command rejected: do not probe guessed paths with chained cd commands. "
+            f"bash already runs in work_dir={work_dir}. Use relative paths, pwd, or list_dir."
+        )
+
+    root = Path(work_dir).resolve()
+
+    def outside(raw: str) -> bool:
+        try:
+            parts = shlex.split(raw)
+            if not parts or parts[0] == "-":
+                return True
+            target = Path(parts[0]).expanduser()
+            resolved = (target if target.is_absolute() else root / target).resolve()
+            resolved.relative_to(root)
+            return False
+        except (ValueError, OSError):
+            return True
+
+    if cd_targets and outside(cd_targets[0]):
+        return (
+            "Error: command rejected: cd target is outside work_dir. "
+            f"bash already runs in {work_dir}; use paths inside this directory."
+        )
+
+    git_dirs = re.findall(
+        r"\bgit\s+-C\s+((?:\"[^\"]*\"|'[^']*'|[^\s;&|]+))",
+        command,
+    )
+    if any(outside(target) for target in git_dirs):
+        return (
+            "Error: command rejected: git -C target is outside work_dir. "
+            f"The repository location is provided in the system context; cwd is {work_dir}."
+        )
+    return ""
+
+
 def _is_readonly(command: str) -> bool:
     """Check if command is read-only (safe to auto-approve)."""
     cmd = command.strip()
-    # Block command chaining, substitution, and redirects BEFORE pipe split
-    # Check the full command for dangerous patterns
-    if any(c in cmd for c in (">", "<", "`", "$(", ";")) or "&&" in cmd or "||" in cmd:
+    # Substitution, redirects, background jobs and multiline shell programs are
+    # not safe to infer without a complete shell parser.
+    if any(c in cmd for c in (">", "<", "`", "$(", "\n", "\r")):
         return False
-    # Handle pipes — check first command
-    # "git log | head" is readonly, "rm -f x | echo done" is not
-    first_cmd = cmd.split("|")[0].strip() if "|" in cmd else cmd
+    try:
+        lexer = shlex.shlex(cmd, posix=True, punctuation_chars="|;&<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return False
+
+    stages = []
+    current = []
+    allowed_separators = {"|", ";", "&&", "||"}
+    for token in tokens:
+        if token in allowed_separators:
+            if not current:
+                return False
+            stages.append(" ".join(current))
+            current = []
+        elif token and all(char in "|;&<>" for char in token):
+            return False
+        else:
+            current.append(token)
+    if not current:
+        return False
+    stages.append(" ".join(current))
+
+    # Every simple command must be read-only. Checking only the first would
+    # incorrectly approve commands such as ``cat file | tee out``.
+    return all(_is_readonly_stage(stage) for stage in stages)
+
+
+def _is_readonly_stage(command: str) -> bool:
+    """Check one pipeline stage against the read-only allowlist."""
+    if not command:
+        return False
     for ro in READONLY_COMMANDS:
-        if first_cmd == ro or first_cmd.startswith(ro + " "):
+        if command == ro or command.startswith(ro + " "):
             return True
     return False
+
+
+def _command_family(command: str) -> str:
+    """Return a compact session-permission key for a shell command."""
+    # Compound shell programs cannot be safely generalized by executable name:
+    # ``cd path; grep ...`` and ``cd path; rm ...`` would otherwise share the
+    # same overly broad ``cd`` permission.  They may still be approved for the
+    # session, but only as the exact same command.
+    if any(token in command for token in (";", "&&", "||", "`", "$(", ">", "<")):
+        return "exact:" + command.strip()
+    families = []
+    dispatchers = {
+        "git", "hg", "svn", "gh", "docker", "podman",
+        "npm", "pnpm", "yarn", "cargo", "go", "make",
+        "python", "python3", "ruby", "php", "node",
+    }
+    for stage in command.split("|"):
+        try:
+            words = shlex.split(stage.strip())
+        except ValueError:
+            words = stage.strip().split()
+        if not words:
+            continue
+        size = 2 if words[0] in dispatchers and len(words) > 1 else 1
+        families.append(" ".join(words[:size]))
+    return " | ".join(families)
 
 
 def _needs_confirm(command: str, confirm_mode: str) -> bool:
@@ -172,6 +276,10 @@ def execute(args: dict, ctx) -> str:
     # Strip redundant cd to work_dir
     command = _strip_cd_prefix(command, str(ctx.work_dir))
 
+    scope_error = _validate_workdir_command(command, str(ctx.work_dir))
+    if scope_error:
+        return scope_error
+
     # Check cache — if same command was run before and truncated,
     # serve from cache with the new max_output limit
     if command in _output_cache:
@@ -186,6 +294,9 @@ def execute(args: dict, ctx) -> str:
             return f"Blocked by hook: {hr.reason or hr.message or 'hook'}"
         if hr.command is not None:
             command = hr.command
+            scope_error = _validate_workdir_command(command, str(ctx.work_dir))
+            if scope_error:
+                return scope_error
 
     confirm_mode = getattr(ctx.config, "confirm_mode", "confirm_all") if ctx.config else "confirm_all"
 

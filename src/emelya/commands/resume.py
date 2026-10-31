@@ -4,6 +4,28 @@ import os
 
 from emelya.i18n import t
 from emelya.input_history import InputHistory
+from emelya.terminal_markdown import render_terminal_markdown
+from emelya.theme import C
+
+
+def _replay_dialog(self):
+    """Replay saved user/assistant messages in their normal conversational form."""
+    visible = [
+        message for message in self.context.messages
+        if message.get("role") in ("user", "assistant") and message.get("content")
+    ]
+    if not visible:
+        return
+    print()
+    for message in visible:
+        content = render_terminal_markdown(str(message["content"]))
+        if message["role"] == "user":
+            label, color = t("you"), C.user_prompt
+        else:
+            label, color = t("emelya"), C.agent_prefix
+        separator = "\n" if content.startswith("┌") else " "
+        print(f"{color}{label}:{C.reset}{separator}{content}")
+    print()
 
 
 def _cmd_resume(self, name: str = ""):
@@ -34,6 +56,13 @@ def _cmd_resume(self, name: str = ""):
 
     self.session_name = name
     self.context.load(ctx_path)
+    # The transient export log is not stored separately. Rebuild its durable
+    # user/assistant portion from Context so /export works after /resume.
+    self.conversation_log = [
+        {"type": message["role"], "content": message.get("content", "")}
+        for message in self.context.messages
+        if message.get("role") in ("user", "assistant")
+    ]
     self.log = self._create_log()
     self.log.event(f"Session resumed: {name}")
     self.tool_ctx.files_read.clear()
@@ -43,3 +72,4 @@ def _cmd_resume(self, name: str = ""):
     tokens = self.context.estimate_tokens()
     n_msgs = len(self.context.messages)
     print(f"  {t('session_loaded')}: {name} ({n_msgs} messages, {tokens} tokens)")
+    _replay_dialog(self)

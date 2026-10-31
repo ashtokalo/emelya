@@ -207,6 +207,7 @@ Instructions loaded into context on demand. Model decides when to load them.
 | `/context` | Show context size |
 | `/history` | Dump full context |
 | `/exit` | Exit |
+| `!<command>` | Run directly; output is stored in session memory and referenced from conversation context |
 
 ## CLI Arguments
 

@@ -137,6 +137,35 @@ class TestAgentDuplicateDetection(unittest.TestCase):
         # Both should execute (different args), then text answer
         self.assertEqual(result, "Done.")
 
+    def test_external_failures_trigger_early_synthesis(self):
+        from emelya.tools.agent import _run_agent_loop
+
+        registry = ToolRegistry()
+        executions = []
+        registry.register("web_search", {
+            "type": "function",
+            "function": {"name": "web_search", "parameters": {
+                "type": "object", "properties": {}, "required": [],
+            }},
+        }, lambda args, ctx: executions.append(args) or "Error: network down")
+        client = MockLLMClient([
+            _make_response(tool_calls=[{"id": "c1", "name": "web_search", "args": {"query": "a"}}]),
+            _make_response(tool_calls=[{"id": "c2", "name": "web_search", "args": {"query": "b"}}]),
+            _make_response(tool_calls=[{"id": "c3", "name": "web_search", "args": {"query": "c"}}]),
+            _make_response(content="Недостаточно данных; сеть недоступна."),
+        ])
+        ctx = _make_ctx(self.tmpdir, client, registry)
+
+        with patch("builtins.print"):
+            result = _run_agent_loop(
+                prompt="найди данные", allowed_tools=["web_search"],
+                max_steps=8, ctx=ctx, depth=1, agent_name="test",
+            )
+
+        self.assertEqual(result, "Недостаточно данных; сеть недоступна.")
+        self.assertEqual(len(executions), 3)
+        self.assertEqual(len(client.calls), 4)
+
 
 class TestAgentForcedLastStep(unittest.TestCase):
 

@@ -164,12 +164,10 @@ class MCPMixin:
                 self._register_mcp_lazy(name, cached)
                 self._mcp_startup_info.append((name, len(cached), True))
             else:
-                try:
-                    self._mcp_connect(name, cfg, cache_dir=cache_dir)
-                    n = len(self._mcp_clients[name].tools)
-                    self._mcp_startup_info.append((name, n, False))
-                except MCPError as e:
-                    self._mcp_startup_info.append((name, 0, False, str(e)))
+                # Never perform network or subprocess I/O during REPL startup.
+                # An uncached server can be populated explicitly with
+                # ``/mcp refresh <name>`` or ``emelya mcp call``.
+                self._mcp_startup_info.append((name, 0, False))
 
     def _register_mcp_lazy(self, server_name: str, cached_tools: list):
         """Register MCP tools with lazy connection — connects on first call."""

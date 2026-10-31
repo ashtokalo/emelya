@@ -15,7 +15,15 @@ def _cmd_export(self, path: str = ""):
 
     lines = [f"# Conversation: {self.session_name}\n"]
 
-    for entry in self.conversation_log:
+    entries = self.conversation_log
+    if not entries:
+        entries = [
+            {"type": message["role"], "content": message.get("content", "")}
+            for message in self.context.messages
+            if message.get("role") in ("user", "assistant")
+        ]
+
+    for entry in entries:
         etype = entry["type"]
         if etype == "user":
             lines.append(f"## User\n\n{entry['content']}\n")
@@ -56,7 +64,7 @@ def _cmd_export(self, path: str = ""):
                     preview += f"\n... ({len(content)} chars total)"
                 lines.append(f"<details><summary>Result ({len(content)} chars)</summary>\n\n```\n{preview}\n```\n</details>\n")
 
-    n_entries = len(self.conversation_log)
+    n_entries = len(entries)
     text = "\n".join(lines)
     export_path.write_text(text, encoding="utf-8")
     print(f"  Exported: {export_path} ({n_entries} entries, {len(text)} chars)")

@@ -39,6 +39,7 @@
   /context               — current context size
   /history               — full context dump
   /exit                  — exit
+  !<command>             — run a shell command directly (interactive TTY supported)
 
   Tips:
 

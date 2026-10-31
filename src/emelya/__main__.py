@@ -11,6 +11,7 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 from emelya.config import parse_args
+from emelya.i18n import t
 from emelya.repl import REPL
 
 
@@ -57,16 +58,22 @@ def _scaffold_emelya(work_dir: Path):
 
 
 def main():
-    from emelya.cli import dispatch
-    if dispatch(sys.argv[1:], scaffold_fn=_scaffold_emelya):
-        return
+    """Run Emelya and translate Ctrl+C into a quiet shell exit."""
+    try:
+        from emelya.cli import dispatch
+        if dispatch(sys.argv[1:], scaffold_fn=_scaffold_emelya):
+            return 0
 
-    config = parse_args()
-    config.work_dir.mkdir(parents=True, exist_ok=True)
-    _scaffold_emelya(config.work_dir)
+        config = parse_args()
+        config.work_dir.mkdir(parents=True, exist_ok=True)
+        _scaffold_emelya(config.work_dir)
 
-    REPL(config).run()
+        REPL(config).run()
+        return 0
+    except KeyboardInterrupt:
+        print(f"\n{t('interrupted')}", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

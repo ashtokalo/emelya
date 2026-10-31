@@ -15,6 +15,75 @@ from emelya.tools import ToolContext, ToolRegistry
 from emelya.models import ModelMixin
 from emelya.mcp_manager import MCPMixin
 from emelya.commands import CommandsMixin
+from emelya.repl import REPL, _find_git_root
+
+
+class TestExecutionEnvironment(unittest.TestCase):
+
+    def test_finds_git_root_from_nested_workdir(self):
+        root = Path(tempfile.mkdtemp())
+        (root / ".git").mkdir()
+        nested = root / "src" / "package"
+        nested.mkdir(parents=True)
+        self.assertEqual(_find_git_root(nested), root)
+
+    def test_git_root_is_optional(self):
+        root = Path(tempfile.mkdtemp())
+        self.assertIsNone(_find_git_root(root))
+
+
+class TestShellEscape(unittest.TestCase):
+
+    def test_runs_with_workdir_and_inherited_stdio(self):
+        repl = REPL.__new__(REPL)
+        repl.config = MagicMock(work_dir=Path("/tmp/project"))
+        repl.context = Context()
+        repl.conversation_log = []
+        repl._autosave = MagicMock()
+        repl.memory_store = MagicMock()
+        repl.memory_store.put.return_value = {"id": "mem-shell-1"}
+        completed = MagicMock(returncode=0)
+        with patch("emelya.repl.subprocess.run", return_value=completed) as run:
+            self.assertEqual(repl._run_shell_escape("mc"), 0)
+        run.assert_called_once_with("mc", shell=True, cwd="/tmp/project")
+        self.assertIn("mem-shell-1", repl.context.messages[-1]["content"])
+        self.assertNotIn("STDOUT", repl.context.messages[-1]["content"])
+        repl._autosave.assert_called_once()
+
+    def test_ctrl_c_returns_to_repl(self):
+        repl = REPL.__new__(REPL)
+        repl.config = MagicMock(work_dir=Path("/tmp/project"))
+        with patch("emelya.repl.subprocess.run", side_effect=KeyboardInterrupt), \
+                patch("builtins.print"):
+            self.assertEqual(repl._run_shell_escape("vim"), 130)
+
+    def test_empty_shell_escape_shows_usage(self):
+        repl = REPL.__new__(REPL)
+        with patch("builtins.print") as output:
+            self.assertEqual(repl._run_shell_escape(""), 2)
+        self.assertIn("Usage", str(output.call_args))
+
+    def test_noninteractive_output_goes_to_memory_not_context(self):
+        repl = REPL.__new__(REPL)
+        repl.config = MagicMock(work_dir=Path("/tmp/project"))
+        repl.context = Context()
+        repl.conversation_log = []
+        repl._autosave = MagicMock()
+        repl.memory_store = MagicMock()
+        repl.memory_store.put.return_value = {"id": "mem-shell-2"}
+        completed = MagicMock(returncode=0, stdout="secret output\n", stderr="")
+        with patch("emelya.repl.subprocess.run", return_value=completed) as run, \
+                patch("builtins.print"):
+            self.assertEqual(repl._run_shell_escape("ls"), 0)
+        run.assert_called_once_with(
+            "ls", shell=True, cwd="/tmp/project",
+            capture_output=True, text=True, errors="replace",
+        )
+        memory_details = repl.memory_store.put.call_args.kwargs["details"]
+        context_entry = repl.context.messages[-1]["content"]
+        self.assertIn("secret output", memory_details)
+        self.assertNotIn("secret output", context_entry)
+        self.assertIn("memory(action=get, id=mem-shell-2)", context_entry)
 
 
 class MockREPL(ModelMixin, MCPMixin, CommandsMixin):
@@ -171,6 +240,60 @@ class TestRenameResumeClear(unittest.TestCase):
         with patch("builtins.print"):
             self.repl._cmd_resume(saved_name)
         self.assertEqual(len(self.repl.context.messages), 2)
+
+    def test_resume_replays_saved_dialog(self):
+        self.repl.context.add_user("какая погода?")
+        self.repl.context.add_assistant_text("Солнечно.")
+        self.repl._autosave()
+        saved_name = self.repl.session_name
+        with patch("builtins.print") as mock_print:
+            self.repl._cmd_resume(saved_name)
+        printed = "\n".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_print.call_args_list
+        )
+        self.assertIn("какая погода?", printed)
+        self.assertIn("Солнечно.", printed)
+
+    def test_resume_replay_renders_markdown_table(self):
+        self.repl.context.add_user("покажи данные")
+        self.repl.context.add_assistant_text("| A | B |\n|---|---|\n| 1 | 2 |")
+        self.repl._autosave()
+        with patch("builtins.print") as mock_print:
+            self.repl._cmd_resume(self.repl.session_name)
+        printed = "\n".join(
+            " ".join(str(arg) for arg in call.args)
+            for call in mock_print.call_args_list
+        )
+        self.assertIn("┌", printed)
+        self.assertNotIn("|---|", printed)
+
+    def test_export_after_resume_contains_saved_dialog(self):
+        self.repl.context.add_user("сделай таблицу")
+        self.repl.context.add_assistant_text("| A | B |\n|---|---|\n| 1 | 2 |")
+        self.repl._autosave()
+        saved_name = self.repl.session_name
+        self.repl.conversation_log = []
+
+        with patch("builtins.print"):
+            self.repl._cmd_resume(saved_name)
+            self.repl._cmd_export("resumed.md")
+
+        exported = (self.tmpdir / "resumed.md").read_text(encoding="utf-8")
+        self.assertIn("сделай таблицу", exported)
+        self.assertIn("| A | B |", exported)
+        self.assertIn("## User", exported)
+        self.assertIn("## Assistant", exported)
+
+    def test_export_falls_back_to_context(self):
+        self.repl.context.add_user("вопрос")
+        self.repl.context.add_assistant_text("ответ")
+        self.repl.conversation_log = []
+        with patch("builtins.print"):
+            self.repl._cmd_export("fallback.md")
+        exported = (self.tmpdir / "fallback.md").read_text(encoding="utf-8")
+        self.assertIn("вопрос", exported)
+        self.assertIn("ответ", exported)
 
     def test_resume_nonexistent(self):
         with patch("builtins.print") as mock_print:
@@ -434,6 +557,20 @@ class TestInitMCPGlobal(unittest.TestCase):
         self._init()
         expected = self.local_dir / ".emelya" / "mcp_cache"
         self.assertEqual(self.repl._mcp_cache_dirs.get("local_srv"), expected)
+
+    def test_uncached_server_does_not_connect_during_startup(self):
+        self._write_mcp(
+            self.global_emelya / "mcp.json",
+            {"remote": {"url": "https://example.invalid/mcp"}},
+        )
+        with patch("emelya.mcp_manager.Path") as MockPath, \
+                patch("emelya.mcp_manager.load_cache", return_value=None), \
+                patch.object(self.repl, "_mcp_connect") as connect:
+            MockPath.home.return_value = self.global_home
+            MockPath.side_effect = lambda *a, **kw: Path(*a, **kw)
+            self.repl._init_mcp()
+        connect.assert_not_called()
+        self.assertIn("remote", self.repl._mcp_config)
 
     def test_local_override_uses_local_cache_dir(self):
         self._write_mcp(

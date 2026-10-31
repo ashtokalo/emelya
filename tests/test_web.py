@@ -104,6 +104,11 @@ class TestWebFetch(unittest.TestCase):
         result = execute({"url": "ftp://example.com"}, make_ctx())
         self.assertIn("Error", result)
 
+    def test_fetch_encodes_unicode_url(self):
+        from emelya.tools.web_fetch import execute
+        result = execute({"url": f"{self.base}/тест"}, make_ctx())
+        self.assertNotIn("ascii codec", result)
+
 
 
 class TestSSRFProtection(unittest.TestCase):
