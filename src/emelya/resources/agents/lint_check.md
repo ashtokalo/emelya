@@ -1,0 +1,1 @@
+../../../../agents/lint_check.md
