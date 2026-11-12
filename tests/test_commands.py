@@ -15,7 +15,7 @@ from emelya.tools import ToolContext, ToolRegistry
 from emelya.models import ModelMixin
 from emelya.mcp_manager import MCPMixin
 from emelya.commands import CommandsMixin
-from emelya.repl import REPL, _find_git_root
+from emelya.repl import REPL, _find_git_root, _resource_root
 
 
 class TestExecutionEnvironment(unittest.TestCase):
@@ -30,6 +30,19 @@ class TestExecutionEnvironment(unittest.TestCase):
     def test_git_root_is_optional(self):
         root = Path(tempfile.mkdtemp())
         self.assertIsNone(_find_git_root(root))
+
+    def test_resource_root_uses_installed_data(self):
+        prefix = Path(tempfile.mkdtemp())
+        installed = prefix / "share" / "emelya"
+        installed.mkdir(parents=True)
+        with patch("emelya.repl.sys.prefix", str(prefix)):
+            self.assertEqual(_resource_root(), installed)
+
+    def test_resource_root_falls_back_to_source_tree(self):
+        prefix = Path(tempfile.mkdtemp())
+        with patch("emelya.repl.sys.prefix", str(prefix)):
+            root = _resource_root()
+        self.assertTrue((root / "prompts" / "system.md").is_file())
 
 
 class TestShellEscape(unittest.TestCase):

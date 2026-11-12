@@ -43,6 +43,14 @@ def _first_heading(text: str) -> str:
     return ""
 
 
+def _resource_root() -> Path:
+    """Return bundled resource root for source and installed layouts."""
+    installed = Path(sys.prefix) / "share" / "emelya"
+    if installed.is_dir():
+        return installed
+    return Path(__file__).parent.parent.parent
+
+
 def _find_git_root(path: Path) -> Path | None:
     """Find the nearest Git worktree root without invoking Git."""
     current = path.resolve()
@@ -134,7 +142,7 @@ class REPL(ModelMixin, MCPMixin, CommandsMixin):
         self.registry = ToolRegistry()
 
         src_dir = Path(__file__).parent          # src/emelya/
-        self.app_dir = src_dir.parent.parent    # project root
+        self.app_dir = _resource_root()
         # Skills and agents search order: builtin → global → local
         # Later entries override earlier ones for the same name.
         global_emelya = Path.home() / ".emelya"

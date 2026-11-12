@@ -30,3 +30,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 emelya = ["tools/*.md", "tools/man/*.md"]
+
+[tool.setuptools.data-files]
+"share/emelya/prompts" = ["prompts/*.md"]
+"share/emelya/skills" = ["skills/*.md"]
+"share/emelya/agents" = ["agents/*.md"]
