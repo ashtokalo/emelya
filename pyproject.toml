@@ -25,5 +25,8 @@ emelya = "emelya.__main__:main"
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.setuptools.package-data]
 emelya = ["tools/*.md", "tools/man/*.md"]

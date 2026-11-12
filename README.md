@@ -27,19 +27,44 @@ Designed for programming, file analysis, debugging, and general-purpose tasks.
 - **Colored output** — themed terminal output with wait spinner and timer
 - **Pure Python** — stdlib only, no pip dependencies
 
+## Installation
+
+Install Emelya from GitHub with [pipx](https://pipx.pypa.io/). `pipx` creates an isolated
+environment and makes the `emelya` command available in your shell:
+
+```bash
+pipx install git+https://github.com/ashtokalo/emelya.git
+```
+
+If `pipx` is not installed yet, follow the
+[pipx installation guide](https://pipx.pypa.io/stable/installation/) and then run the command
+above.
+
+To update an existing installation to the latest version from GitHub:
+
+```bash
+pipx upgrade emelya
+```
+
+Run Emelya from the directory you want it to work with:
+
+```bash
+emelya
+```
+
 ## Quick Start
 
 ```bash
 # Local model via llama.cpp
 llama-server -m model.gguf -c 8192
-./run.sh
+emelya
 
 # Use a specific configured model
-./run.sh --use deepseek
+emelya --use deepseek
 
 # With options
-./run.sh --host 192.168.1.100 --port 9090 --work-dir /path/to/project
-./run.sh --confirm none --no-stream --context-limit 32000
+emelya --host 192.168.1.100 --port 9090 --work-dir /path/to/project
+emelya --confirm none --no-stream --context-limit 32000
 ```
 
 ## Multi-Model Support
